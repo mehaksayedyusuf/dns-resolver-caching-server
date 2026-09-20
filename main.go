@@ -6,6 +6,7 @@ import (
 	"net"
 	"time"
 
+	"dns-resolver-caching-server/cache"
 	"dns-resolver-caching-server/handler"
 	"dns-resolver-caching-server/resolver"
 	"dns-resolver-caching-server/response"
@@ -28,10 +29,11 @@ func main() {
 	}
 	defer conn.Close()
 
-	// Initialize DNS Resolution Engine with 2 second timeout
+	// Initialize DNS Resolution Engine & In-Memory Cache
 	dnsResolver := resolver.NewResolver("", 2*time.Second)
+	dnsCache := cache.NewCache()
 
-	fmt.Printf("DNS Server listening on %s (Upstream: %s)...\n", address, dnsResolver.UpstreamAddr)
+	fmt.Printf("DNS Server & Cache listening on %s (Upstream: %s)...\n", address, dnsResolver.UpstreamAddr)
 
 	// Buffer to store incoming packet data (512 bytes standard for conventional DNS over UDP)
 	buf := make([]byte, 512)
@@ -56,23 +58,56 @@ func main() {
 
 		fmt.Printf("[Query Handling Engine] Validated Query: %s (TxID 0x%04X)\n", query.Domain, query.Header.ID)
 
-		// Step 2: Perform Upstream DNS Resolution
-		result, err := dnsResolver.Resolve(query)
-		if err != nil {
-			log.Printf("[DNS Resolution Engine] Resolution failed for %s: %v\n", query.Domain, err)
-			continue
+		// Step 2: Check Local In-Memory DNS Cache
+		cacheKey := cache.NewKey(query.Domain, query.Type, query.Class)
+		cachedEntry, hit := dnsCache.Get(cacheKey)
+
+		var result *resolver.Result
+
+		if hit {
+			fmt.Printf("[CACHE] HIT: %s\n", query.Domain)
+
+			// Reconstruct resolver.Result from cached entry
+			result = &resolver.Result{
+				Domain:       cachedEntry.Domain,
+				Type:         cachedEntry.Type,
+				Class:        cachedEntry.Class,
+				IP:           cachedEntry.IP,
+				TTL:          cachedEntry.TTL,
+				UpstreamAddr: "CACHE",
+			}
+		} else {
+			fmt.Printf("[CACHE] MISS: %s\n", query.Domain)
+
+			// Step 3: Perform Upstream DNS Resolution on Cache Miss
+			res, err := dnsResolver.Resolve(query)
+			if err != nil {
+				log.Printf("[DNS Resolution Engine] Resolution failed for %s: %v\n", query.Domain, err)
+				continue
+			}
+
+			result = res
+			fmt.Printf("[DNS Resolution Engine] Resolved %s -> %s (TTL: %ds)\n", result.Domain, result.IP, result.TTL)
+
+			// Step 4: Store Resolution Result in Cache
+			dnsCache.Set(cacheKey, cache.Entry{
+				Domain: result.Domain,
+				Type:   result.Type,
+				Class:  result.Class,
+				IP:     result.IP,
+				TTL:    result.TTL,
+			})
+			fmt.Printf("[CACHE] STORED: %s (IP: %s, TTL: %ds)\n", result.Domain, result.IP, result.TTL)
 		}
 
-		fmt.Printf("[DNS Resolution Engine] Resolved %s -> %s (TTL: %ds)\n", result.Domain, result.IP, result.TTL)
-
-		// Step 3: Generate Binary DNS Response Packet
+		// Step 5: Generate Binary DNS Response Packet
 		respBytes, err := response.BuildSuccessResponse(query, result)
 		if err != nil {
 			log.Printf("[Response Generation Engine] Failed to build response for %s: %v\n", query.Domain, err)
 			continue
 		}
 
-		// Step 4: Transmit DNS Response back to original client via UDP
+		// Step 6: Transmit DNS Response back to original client via UDP
 		_, err = conn.WriteToUDP(respBytes, clientAddr)
 		if err != nil {
 			log.Printf("[Response Generation Engine] Failed to send UDP response to %s: %v\n", clientAddr.String(), err)
