@@ -1,18 +1,14 @@
 package dns
 
 import (
-	"errors"
 	"fmt"
 )
 
-var (
-	ErrNoQuestions = errors.New("malformed DNS packet: zero questions in query")
-)
-
-// Packet represents a parsed DNS query packet.
+// Packet represents a parsed DNS query or response packet.
 type Packet struct {
 	Header    Header
 	Questions []Question
+	Answers   []ResourceRecord
 }
 
 // ParsePacket parses raw UDP packet bytes into a structured DNS Packet.
@@ -34,8 +30,19 @@ func ParsePacket(data []byte) (*Packet, error) {
 		offset = newOffset
 	}
 
+	answers := make([]ResourceRecord, 0, header.ANCount)
+	for i := 0; i < int(header.ANCount); i++ {
+		ans, newOffset, err := ParseAnswer(data, offset)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse answer %d: %w", i+1, err)
+		}
+		answers = append(answers, ans)
+		offset = newOffset
+	}
+
 	return &Packet{
 		Header:    header,
 		Questions: questions,
+		Answers:   answers,
 	}, nil
 }

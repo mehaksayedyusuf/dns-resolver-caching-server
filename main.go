@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"time"
 
 	"dns-resolver-caching-server/handler"
+	"dns-resolver-caching-server/resolver"
 )
 
 func main() {
@@ -25,7 +27,10 @@ func main() {
 	}
 	defer conn.Close()
 
-	fmt.Printf("DNS Query Handling Engine listening on %s...\n", address)
+	// Initialize DNS Resolution Engine with 2 second timeout
+	dnsResolver := resolver.NewResolver("", 2*time.Second)
+
+	fmt.Printf("DNS Resolver & Engine listening on %s (Upstream: %s)...\n", address, dnsResolver.UpstreamAddr)
 
 	// Buffer to store incoming packet data (512 bytes standard for conventional DNS over UDP)
 	buf := make([]byte, 512)
@@ -41,18 +46,28 @@ func main() {
 
 		fmt.Printf("\n--- Incoming Packet (%d bytes) from %s ---\n", n, clientAddr.String())
 
-		// Process and validate packet through the Query Handling Engine
+		// Step 1: Process and validate packet through Query Handling Engine
 		query, err := handler.ProcessPacket(buf[:n])
 		if err != nil {
 			log.Printf("[Query Handling Engine] Rejected query from %s: %v\n", clientAddr.String(), err)
 			continue
 		}
 
-		// Log structured, validated query representation ready for resolution/cache
-		fmt.Println("[Query Handling Engine] Validated Internal Query:")
-		fmt.Printf("  Tx ID   : 0x%04X (%d)\n", query.Header.ID, query.Header.ID)
-		fmt.Printf("  Domain  : %s\n", query.Domain)
-		fmt.Printf("  QTYPE   : %d (A)\n", query.Type)
-		fmt.Printf("  QCLASS  : %d (IN)\n", query.Class)
+		fmt.Printf("[Query Handling Engine] Validated Query: %s (TxID 0x%04X)\n", query.Domain, query.Header.ID)
+
+		// Step 2: Perform Upstream DNS Resolution
+		result, err := dnsResolver.Resolve(query)
+		if err != nil {
+			log.Printf("[DNS Resolution Engine] Resolution failed for %s: %v\n", query.Domain, err)
+			continue
+		}
+
+		// Step 3: Log Successful Resolution Result
+		fmt.Println("[DNS Resolution Engine] Resolution Succeeded:")
+		fmt.Printf("  Domain       : %s\n", result.Domain)
+		fmt.Printf("  Resolved IP  : %s\n", result.IP)
+		fmt.Printf("  TTL          : %d seconds\n", result.TTL)
+		fmt.Printf("  Upstream     : %s\n", result.UpstreamAddr)
+		fmt.Printf("  Elapsed Time : %v\n", result.Duration)
 	}
 }
