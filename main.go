@@ -5,7 +5,7 @@ import (
 	"log"
 	"net"
 
-	"dns-resolver-caching-server/dns"
+	"dns-resolver-caching-server/handler"
 )
 
 func main() {
@@ -25,7 +25,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	fmt.Printf("DNS Resolver listening on %s...\n", address)
+	fmt.Printf("DNS Query Handling Engine listening on %s...\n", address)
 
 	// Buffer to store incoming packet data (512 bytes standard for conventional DNS over UDP)
 	buf := make([]byte, 512)
@@ -41,23 +41,18 @@ func main() {
 
 		fmt.Printf("\n--- Incoming Packet (%d bytes) from %s ---\n", n, clientAddr.String())
 
-		// Parse raw []byte packet into structured DNS packet
-		packet, err := dns.ParsePacket(buf[:n])
+		// Process and validate packet through the Query Handling Engine
+		query, err := handler.ProcessPacket(buf[:n])
 		if err != nil {
-			log.Printf("Failed to parse DNS packet: %v\n", err)
+			log.Printf("[Query Handling Engine] Rejected query from %s: %v\n", clientAddr.String(), err)
 			continue
 		}
 
-		// Display parsed DNS header and question fields
-		fmt.Printf("Transaction ID: 0x%04X (%d)\n", packet.Header.ID, packet.Header.ID)
-		fmt.Printf("Flags         : 0x%04X\n", packet.Header.Flags)
-		fmt.Printf("Questions     : %d\n", len(packet.Questions))
-
-		for i, q := range packet.Questions {
-			fmt.Printf("  Question #%d:\n", i+1)
-			fmt.Printf("    Domain : %s\n", q.Name)
-			fmt.Printf("    QTYPE  : %d\n", q.Type)
-			fmt.Printf("    QCLASS : %d\n", q.Class)
-		}
+		// Log structured, validated query representation ready for resolution/cache
+		fmt.Println("[Query Handling Engine] Validated Internal Query:")
+		fmt.Printf("  Tx ID   : 0x%04X (%d)\n", query.Header.ID, query.Header.ID)
+		fmt.Printf("  Domain  : %s\n", query.Domain)
+		fmt.Printf("  QTYPE   : %d (A)\n", query.Type)
+		fmt.Printf("  QCLASS  : %d (IN)\n", query.Class)
 	}
 }
