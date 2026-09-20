@@ -60,26 +60,31 @@ func main() {
 
 		// Step 2: Check Local In-Memory DNS Cache
 		cacheKey := cache.NewKey(query.Domain, query.Type, query.Class)
-		cachedEntry, hit := dnsCache.Get(cacheKey)
+		cachedEntry, hit, expired := dnsCache.Get(cacheKey)
 
 		var result *resolver.Result
 
 		if hit {
-			fmt.Printf("[CACHE] HIT: %s\n", query.Domain)
+			remTTL := cachedEntry.RemainingTTL()
+			fmt.Printf("[CACHE] HIT: %s (Remaining TTL: %ds)\n", query.Domain, remTTL)
 
-			// Reconstruct resolver.Result from cached entry
+			// Reconstruct resolver.Result from cached entry with remaining TTL
 			result = &resolver.Result{
 				Domain:       cachedEntry.Domain,
 				Type:         cachedEntry.Type,
 				Class:        cachedEntry.Class,
 				IP:           cachedEntry.IP,
-				TTL:          cachedEntry.TTL,
+				TTL:          remTTL,
 				UpstreamAddr: "CACHE",
 			}
 		} else {
-			fmt.Printf("[CACHE] MISS: %s\n", query.Domain)
+			if expired {
+				fmt.Printf("[CACHE] EXPIRED: %s\n", query.Domain)
+			} else {
+				fmt.Printf("[CACHE] MISS: %s\n", query.Domain)
+			}
 
-			// Step 3: Perform Upstream DNS Resolution on Cache Miss
+			// Step 3: Perform Upstream DNS Resolution on Cache Miss / Expired
 			res, err := dnsResolver.Resolve(query)
 			if err != nil {
 				log.Printf("[DNS Resolution Engine] Resolution failed for %s: %v\n", query.Domain, err)
@@ -89,13 +94,16 @@ func main() {
 			result = res
 			fmt.Printf("[DNS Resolution Engine] Resolved %s -> %s (TTL: %ds)\n", result.Domain, result.IP, result.TTL)
 
-			// Step 4: Store Resolution Result in Cache
+			// Step 4: Store Resolution Result in Cache with actual upstream TTL & ExpiresAt
+			now := time.Now()
 			dnsCache.Set(cacheKey, cache.Entry{
-				Domain: result.Domain,
-				Type:   result.Type,
-				Class:  result.Class,
-				IP:     result.IP,
-				TTL:    result.TTL,
+				Domain:    result.Domain,
+				Type:      result.Type,
+				Class:     result.Class,
+				IP:        result.IP,
+				TTL:       result.TTL,
+				CreatedAt: now,
+				ExpiresAt: now.Add(time.Duration(result.TTL) * time.Second),
 			})
 			fmt.Printf("[CACHE] STORED: %s (IP: %s, TTL: %ds)\n", result.Domain, result.IP, result.TTL)
 		}
