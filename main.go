@@ -8,6 +8,7 @@ import (
 
 	"dns-resolver-caching-server/handler"
 	"dns-resolver-caching-server/resolver"
+	"dns-resolver-caching-server/response"
 )
 
 func main() {
@@ -30,7 +31,7 @@ func main() {
 	// Initialize DNS Resolution Engine with 2 second timeout
 	dnsResolver := resolver.NewResolver("", 2*time.Second)
 
-	fmt.Printf("DNS Resolver & Engine listening on %s (Upstream: %s)...\n", address, dnsResolver.UpstreamAddr)
+	fmt.Printf("DNS Server listening on %s (Upstream: %s)...\n", address, dnsResolver.UpstreamAddr)
 
 	// Buffer to store incoming packet data (512 bytes standard for conventional DNS over UDP)
 	buf := make([]byte, 512)
@@ -62,12 +63,22 @@ func main() {
 			continue
 		}
 
-		// Step 3: Log Successful Resolution Result
-		fmt.Println("[DNS Resolution Engine] Resolution Succeeded:")
-		fmt.Printf("  Domain       : %s\n", result.Domain)
-		fmt.Printf("  Resolved IP  : %s\n", result.IP)
-		fmt.Printf("  TTL          : %d seconds\n", result.TTL)
-		fmt.Printf("  Upstream     : %s\n", result.UpstreamAddr)
-		fmt.Printf("  Elapsed Time : %v\n", result.Duration)
+		fmt.Printf("[DNS Resolution Engine] Resolved %s -> %s (TTL: %ds)\n", result.Domain, result.IP, result.TTL)
+
+		// Step 3: Generate Binary DNS Response Packet
+		respBytes, err := response.BuildSuccessResponse(query, result)
+		if err != nil {
+			log.Printf("[Response Generation Engine] Failed to build response for %s: %v\n", query.Domain, err)
+			continue
+		}
+
+		// Step 4: Transmit DNS Response back to original client via UDP
+		_, err = conn.WriteToUDP(respBytes, clientAddr)
+		if err != nil {
+			log.Printf("[Response Generation Engine] Failed to send UDP response to %s: %v\n", clientAddr.String(), err)
+			continue
+		}
+
+		fmt.Printf("[Response Generation Engine] Transmitted DNS Response (%d bytes) to %s\n", len(respBytes), clientAddr.String())
 	}
 }
