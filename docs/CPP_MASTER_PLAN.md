@@ -154,6 +154,9 @@ flowchart LR
 
 Engine E1 handles the raw binary serialization and deserialization compliant with **RFC 1035**.
 
+### Wire Protocol & Decompression Diagram
+![RFC 1035 Wire Format & Decompression](../diagrams/wire_protocol_format_diagram.png)
+
 ### DNS 12-Byte Header Wire Structure
 ```
  0                   1                   2                   3
@@ -196,6 +199,9 @@ sequenceDiagram
 ## 6. Visual Concurrency & Thread Pool Architecture
 
 Engine E4 dispatches client requests concurrently using an OS worker thread pool to sustain high query volume without socket drops.
+
+### Concurrency & Thread Pool Architecture Diagram
+![Concurrency & Thread Pool Architecture](../diagrams/concurrency_threadpool_diagram.png)
 
 ```mermaid
 flowchart TD

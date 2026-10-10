@@ -44,12 +44,15 @@ a:/dns-resolver-caching-server/
 │   ├── Gate_0_team11_ppt.pptx
 │   ├── Team11_Gate1.pptx
 │   └── Team11_S1_Student_Handbook.docx
+├── diagrams/                                  # [PRIMARY HIGH-RES ASSETS - 300 DPI]
+│   ├── system_orbit_diagram.png               # Orbit architecture graphic (766 KB)
+│   ├── engine_pipeline_diagram.png            # 6-stage instruction pipeline graphic (348 KB)
+│   ├── cache_lru_minheap_diagram.png          # Dual-index O(1) LRU + O(log N) TTL (345 KB)
+│   ├── wire_protocol_format_diagram.png       # 12-byte header + pointer loop guard (390 KB)
+│   └── concurrency_threadpool_diagram.png     # Reactor, Thread Pool & SRWLOCK (407 KB)
 ├── docs/
-│   └── diagrams/                              # Generated high-resolution architectural assets
-│       ├── generate_diagrams.py               # Standalone diagram generator script
-│       ├── system_orbit_diagram.png           # Orbit architecture graphic
-│       ├── engine_pipeline_diagram.png        # 6-stage instruction pipeline graphic
-│       └── cache_lru_minheap_diagram.png      # O(1) LRU + O(log N) Min-Heap diagram
+│   ├── CPP_MASTER_PLAN.md                     # Synchronized Master Plan
+│   └── diagrams/                              # Mirrored architectural assets
 ├── include/
 │   └── common.hpp                             # RFC 1035 constants, RAII Mutex & SRWLOCK wrappers
 ├── src/                                       # (Will contain engine implementations)
