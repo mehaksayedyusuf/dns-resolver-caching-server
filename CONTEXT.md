@@ -38,7 +38,8 @@ a:/dns-resolver-caching-server/
 ├── Makefile                                   # MinGW C++ build system (all, test, clean)
 ├── README.md                                  # Repository overview
 ├── .gitignore                                 # Ignores *.o, *.exe, bin/, *.db
-├── DOCUMENTATION/                             # [PRESERVED DELIVERABLES]
+├── DOCUMENTATION/                             # [PRESERVED DELIVERABLES & LIVING GUIDE]
+│   ├── CPP_MASTER_PLAN_GUIDE.md               # [LIVING MASTER PLAN] Synchronized on every change
 │   ├── Gate_0_team11_document.docx
 │   ├── Gate_0_team11_ppt.pptx
 │   ├── Team11_Gate1.pptx
