@@ -2,8 +2,8 @@
 ## DNS Resolver and Caching Server (Academic Theme 4: Network Systems & Tools)
 
 > **CRITICAL LIVING DOCUMENT RULE:**  
-> This file is the authoritative Master Plan Guide for the project.  
-> Whenever any design decision, interface, algorithm, engine boundary, or implementation step is modified or added during development, **this document MUST be updated immediately** so that it remains 100% synchronized with the active C++ codebase.
+> This file is the primary Master Plan Guide for the project.  
+> Whenever any design decision, interface, algorithm, engine boundary, or implementation detail is modified or added during development, **this document MUST be updated immediately** so that it remains 100% synchronized with the active C++ codebase.
 
 ---
 
@@ -13,122 +13,255 @@
 
 ---
 
-## 2. Complete Journey of One DNS Request (Trace)
+## 2. Visual System Architecture: The Orbit Model
 
-```
-[ Client: dig @127.0.0.1 -p 8053 example.com A ]
-       │
-       │  (1) Raw UDP Datagram (29 bytes)
-       ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│  Server Network Reactor (src/main.cpp)                                 │
-│  • recvfrom() ingests 512-byte buffer on UDP 127.0.0.1:8053            │
-│  • Allocates isolated packet buffer                                    │
-│  • Enqueues transaction into Worker Thread Pool                        │
-└──────────────────────────────────┬─────────────────────────────────────┘
-                                   │
-                                   ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│  Engine E4: Query Execution Virtual Machine (src/vm_engine.cpp)        │
-│                                                                        │
-│  [STAGE 1: FETCH]                                                      │
-│  Extract client sockaddr_in and byte length; timestamp request start. │
-│                                                                        │
-│  [STAGE 2: DECODE — Engine E1]                                         │
-│  • Parse 12-byte Header bitfields (TxID, Flags, QDCount)               │
-│  • Decode Question: QNAME ("example.com"), QTYPE (1=A), QCLASS (1=IN)  │
-│  • Validate bounds & check recursion loop depth (max 16 pointers)      │
-│  • Error handling: If malformed -> Generate FORMERR (RCODE 1)          │
-│                                                                        │
-│  [STAGE 3: LOOKUP — Engine E2]                                         │
-│  • Query In-Memory Cache via Key: (Domain, QTYPE, QCLASS)              │
-│  • Acquire SRWLOCK Shared (Read Lock)                                  │
-│  • Case HIT:                                                           │
-│      - Calculate dynamic TTL: rem_ttl = orig_ttl - elapsed_seconds     │
-│      - Splice Node to Head of LRU List (Promote Recency)               │
-│      - Skip upstream resolution -> Jump to STAGE 6 (EMIT)              │
-│  • Case MISS / EXPIRED:                                                │
-│      - Remove expired entry via Min-Heap / Lazy sweep                  │
-│      - Proceed to STAGE 4 (RESOLVE)                                    │
-│                                                                        │
-│  [STAGE 4: RESOLVE — Engine E3]                                        │
-│  • Dispatch query to upstream resolver (8.8.8.8:53) over UDP           │
-│  • Socket polling with non-blocking select() and 2.0s timeout          │
-│  • Validate response TxID (Kaminsky cache poisoning defense)           │
-│  • On Upstream Timeout -> Retry failover (1.1.1.1) -> or SERVFAIL     │
-│  • Parse Answer RRSet (IP: 93.184.216.34, Authoritative TTL: 300s)     │
-│                                                                        │
-│  [STAGE 5: COMMIT — Engine E2]                                         │
-│  • Acquire SRWLOCK Exclusive (Write Lock)                              │
-│  • Insert into Hash Index + Prepend to LRU Doubly-Linked List          │
-│  • Push Expiration Node into Min-Heap (ExpiresAt = now + TTL)          │
-│  • If Cache Size > MaxCapacity: Evict Tail Node in O(1) time           │
-│                                                                        │
-│  [STAGE 6: EMIT — Engine E1]                                           │
-│  • Build binary DNS response wire format                               │
-│  • Set Header: QR=1, AA=0, RA=1, RD preserved, RCODE=0                 │
-│  • Question Section copied verbatim                                    │
-│  • Answer Section: 0xC00C compression pointer + Type + Class + TTL + IP│
-│  • sendto() transmits response datagram back to client                 │
-│  • Record end timestamp -> Update Engine E4 Telemetry Metrics          │
-└────────────────────────────────────────────────────────────────────────┘
-       │
-       │  (2) Binary DNS Response Datagram (45 bytes)
-       ▼
-[ Client receives answer: example.com -> 93.184.216.34 (TTL: 300s) ]
+The system follows an **Orbit Architecture Model** where **Engine E4 (Query Execution VM)** acts as the gravitational center, orchestrating specialized satellite engines and external actors.
+
+### Architectural Diagram
+![System Orbit Architecture](../docs/diagrams/system_orbit_diagram.png)
+
+### Architectural Orbit Mermaid Specification
+```mermaid
+flowchart TD
+    subgraph External["External Network & Storage Boundaries"]
+        Client["DNS Client\n(dig / nslookup / stub resolver)\nPort 8053 (UDP)"]
+        Upstream["Upstream Recursive Resolvers\n(8.8.8.8 / 1.1.1.1)\nPort 53 (UDP)"]
+        Disk[("Disk Snapshot File\n(dns_cache.db)")]
+    end
+
+    subgraph CoreVM["ENGINE E4: Gravitational Core — Query Execution VM"]
+        Reactor["UDP Network Reactor\nNon-blocking socket listener"]
+        WorkerPool["Worker Thread Pool\nThread-safe Task Queue"]
+        VMState["6-Stage Instruction Pipeline\nFETCH ➔ DECODE ➔ LOOKUP ➔ RESOLVE ➔ COMMIT ➔ EMIT"]
+        Telemetry["Telemetry & KPI Engine\nAtomic counters & microsecond timers"]
+        Reactor --> WorkerPool
+        WorkerPool --> VMState
+        VMState -.-> Telemetry
+    end
+
+    subgraph Satellites["Specialized Satellite Engines"]
+        E1["ENGINE E1: Protocol Parsing Engine\n(Vageesh Mathad)\n• RFC 1035 Wire Unpacker\n• Recursion-Bounded Decompressor (depth<=16)\n• Endianness Conversion (htons/ntohs)\n• Response Wire Serializer"]
+        
+        E2["ENGINE E2: In-Memory Storage & Cache Engine\n(Mehak Sayed Yusuf)\n• Hash Table + Doubly-Linked List (O(1) LRU)\n• Min-Heap Priority Queue (O(log N) TTL)\n• Dynamic TTL Recalculation (TTL_orig - Δt)\n• Win32 SRWLOCK Multi-Reader Concurrency"]
+        
+        E3["ENGINE E3: Upstream Resolution Engine\n(Ishani G)\n• Outbound UDP Socket with select() timeout\n• Exponential Retry Backoff\n• Randomized 16-bit TxID Verification\n• Kaminsky Poisoning Defense"]
+    end
+
+    Client ==>|1. Raw UDP Datagram| Reactor
+    VMState <===>|2. Parse Wire & Serialize Response| E1
+    VMState <===>|3. LRU Lookup & Cache Commit| E2
+    VMState <===>|4. Forward on Cache Miss| E3
+    E3 <===>|Outbound Recursive Query| Upstream
+    E2 <===>|Shutdown Dump & Boot Warm-up| Disk
+    VMState ==>|5. Emit Response Datagram| Client
 ```
 
 ---
 
-## 3. Four Core Engines Decomposition (S1 Aligned)
+## 3. Visual 6-Stage VM Execution Pipeline & Decision Tree
 
-### Engine E1: Protocol Parsing & Wire Message Engine
-- **Primary Owner:** Vageesh Mathad (01fe24bci008)
-- **Academic Domain:** Computer Networks
-- **Core Responsibilities:**
-  1. **Binary Wire Ingestion:** Deserializes raw RFC 1035 network buffers into structured C++ types (`Header`, `Question`, `ResourceRecord`, `Message`).
-  2. **Domain Label Pointer Decompression:** RFC 1035 compression uses `0xC0` high bits to signal a 14-bit pointer offset. E1 includes a strict dereference depth counter (`depth <= 16`) to neutralize cyclic decompression attacks.
-  3. **Endianness Transformation:** Safe network-to-host (`ntohs`, `ntohl`) and host-to-network (`htons`, `htonl`) bitfield packing.
-  4. **Wire Serializer:** Manages byte-buffer cursors to serialize response packets with pointer compression (`0xC00C`).
+Every incoming DNS request executes through an instruction pipeline modeled as an explicit state machine inside **Engine E4**.
 
-### Engine E2: In-Memory DNS Storage & Cache Engine
-- **Primary Owner:** Mehak Sayed Yusuf (01fe24bci012)
-- **Academic Domain:** Design & Analysis of Algorithms / DBMS
-- **Core Responsibilities:**
-  1. **Dual-Indexed Cache:**
-     - **$O(1)$ LRU Eviction Subsystem:** `std::unordered_map<CompositeKey, LRUNode*>` paired with an intrusive doubly-linked list (`std::list` / raw pointer node chain). Hit nodes splice to head in $O(1)$; tail node evicts in $O(1)$ at cache ceiling.
-     - **$O(\log N)$ Proactive TTL Purge:** Min-Heap priority queue (`std::priority_queue`) ordered by absolute expiration timestamp (`ExpiresAt`). Allows immediate identification and removal of expired records without scanning the entire cache.
-  2. **Dynamic TTL Aging:** Decrements TTL dynamically on cache hits ($TTL_{rem} = TTL_{orig} - \Delta t$). Clients receive valid, non-stale countdowns.
-  3. **Multi-Threaded Concurrency:** Protected by native Windows `SRWLOCK` supporting concurrent reads (`AcquireSRWLockShared`) and atomic single-writer mutations (`AcquireSRWLockExclusive`).
-  4. **Durability & Persistence:** Dumps active cache state to disk binary snapshot (`dns_cache.db`) on graceful shutdown (`SIGINT`), and performs cache warm-up on boot.
+### Pipeline Stages Diagram
+![Engine Pipeline Stages](../docs/diagrams/engine_pipeline_diagram.png)
 
-### Engine E3: Upstream Resolution & Network Forwarding Engine
-- **Primary Owner:** Ishani G (01fe22bci009)
-- **Academic Domain:** Computer Networks / Operating Systems
-- **Core Responsibilities:**
-  1. **Recursive Query Forwarding:** Dispatches uncached queries to external upstream servers (Primary: `8.8.8.8`, Fallback: `1.1.1.1`) over non-blocking UDP sockets.
-  2. **Non-Blocking I/O & Timers:** Utilizes `select()` with `struct timeval` for microsecond-precision timeout detection (2.0s timeout cap).
-  3. **Exponential Retry & Failover:** Retries dropped packets with backoff before falling back to secondary upstream. Returns `SERVFAIL` (RCODE 2) if all upstreams fail.
-  4. **Kaminsky Spoofing Defense:** Validates that incoming upstream responses match the exact 16-bit Transaction ID and expected source IP.
+### Comprehensive Pipeline Flowchart & Query Condition Matrix
+```mermaid
+flowchart TD
+    Start([UDP Datagram Received on Port 8053]) --> S1[STAGE 1: FETCH\nRead raw buffer, isolate slice,\nextract client sockaddr_in, timestamp start]
 
-### Engine E4: Query Execution Virtual Machine & Telemetry Engine
-- **Primary Owner:** Joel Biju (01fe24bci021)
-- **Academic Domain:** Operating Systems Principles & Programming
-- **Core Responsibilities:**
-  1. **VM Pipeline State Machine:** Orchestrates the 6-stage lifecycle (`FETCH ➔ DECODE ➔ LOOKUP ➔ RESOLVE ➔ COMMIT ➔ EMIT`).
-  2. **Condition Handling Matrix:** Deterministically routes all query conditions:
-     - `HIT` -> dynamic TTL decrement & immediate emit.
-     - `MISS` -> upstream resolution & cache commit.
-     - `EXPIRED` -> lazy purge & upstream re-resolve.
-     - `NXDOMAIN` -> RFC 2308 negative caching using SOA minimum TTL.
-     - `SERVFAIL` -> upstream timeout / network outage response.
-     - `FORMERR` -> syntax / malformed packet response.
-  3. **Worker Thread Pool:** Thread pool with thread-safe task queue to handle high-concurrency client load (>= 1,000 QPS) without socket buffer drops.
-  4. **Telemetry & Benchmarking:** Real-time tracking of hit ratio %, average latency in microseconds (cache hit < 1 ms vs upstream ~30 ms), throughput QPS, and live console stats.
+    S1 --> S2[STAGE 2: DECODE - Engine E1\nParse 12-byte Header bitfields,\ndecode QNAME with recursion depth limit <= 16]
+
+    S2 --> CheckMalformed{Packet valid\n& length >= 12?}
+    CheckMalformed -- No --> EmitFORMERR[Generate FORMERR\nRCODE 1 Response] --> S6_Emit
+    CheckMalformed -- Yes --> S3[STAGE 3: LOOKUP - Engine E2\nQuery in-memory cache using\nCompositeKey: domain + qtype + qclass]
+
+    S3 --> CacheVerdict{Cache\nLookup\nVerdict}
+
+    CacheVerdict -- HIT --> DynamicTTL[Recalculate Dynamic TTL:\nTTL_rem = TTL_orig - elapsed_time\nPromote node to Head of LRU List]
+    DynamicTTL --> S6_Build[Build Success Response with\ncached IP and remaining TTL]
+    S6_Build --> S6_Emit
+
+    CacheVerdict -- EXPIRED --> PurgeExpired[Lazy Purge expired entry\nvia Min-Heap root pop]
+    PurgeExpired --> S4[STAGE 4: RESOLVE - Engine E3\nForward raw query to 8.8.8.8:53\nvia non-blocking UDP socket]
+
+    CacheVerdict -- MISS --> S4
+
+    S4 --> UpstreamWait{Upstream\nResponse in <= 2.0s?}
+    UpstreamWait -- Timeout --> RetryUpstream{Retry count < 2?}
+    RetryUpstream -- Yes --> S4
+    RetryUpstream -- No --> UpstreamFailover{Failover to 1.1.1.1?}
+    UpstreamFailover -- Failed --> EmitSERVFAIL[Generate SERVFAIL\nRCODE 2 Response] --> S6_Emit
+    
+    UpstreamWait -- Response Received --> ValidateTxID{16-bit TxID\nmatches query?}
+    ValidateTxID -- Mismatch --> DropSpoofed[Drop packet:\nKaminsky Spoofing Detected] --> EmitSERVFAIL
+    ValidateTxID -- Valid --> ParseUpstream[Parse Upstream Response RRSet]
+
+    ParseUpstream --> CheckRCODE{Upstream\nRCODE?}
+    CheckRCODE -- NXDOMAIN --> NegativeCache[RFC 2308 Negative Caching:\nStore NXDOMAIN with SOA TTL]
+    NegativeCache --> S6_Emit
+
+    CheckRCODE -- NOERROR --> S5[STAGE 5: COMMIT - Engine E2\nAcquire SRWLOCK Exclusive:\nInsert into Hash Map + LRU Head\nPush Expiration to Min-Heap\nEvict LRU Tail if capacity > MaxCapacity]
+
+    S5 --> S6_Emit[STAGE 6: EMIT - Engine E1\nSerialize wire response with 0xC00C pointer,\nsendto client via UDP,\nrecord duration in Telemetry Engine]
+    S6_Emit --> End([Client Receives Response])
+```
 
 ---
 
-## 4. Implementation Phases & Milestones
+## 4. Visual Dual-Index In-Memory Cache Model
+
+Engine E2 provides a high-performance **dual-indexed storage architecture** combining an $O(1)$ LRU eviction list with an $O(\log N)$ proactive Min-Heap priority queue.
+
+### Cache Dual-Index Diagram
+![Dual-Index Cache Architecture](../docs/diagrams/cache_lru_minheap_diagram.png)
+
+### Cache Memory & Data Structure Blueprint
+```mermaid
+flowchart LR
+    subgraph HashIndex["1. Primary Hash Index: O(1) Access"]
+        Map["std::unordered_map&lt;CompositeKey, Node*&gt;\nKey: {domain: 'example.com', qtype: 1, qclass: 1}"]
+    end
+
+    subgraph LRUList["2. Doubly-Linked Recency List: O(1) LRU Eviction"]
+        direction LR
+        HeadNode["[MRU Head]\nMost Recently Used"] <---> Node1["Node A\n(Hit: Spliced to Head)"]
+        Node1 <---> Node2["Node B\n..."]
+        Node2 <---> TailNode["[LRU Tail]\nLeast Recently Used\n(Evicted at capacity limit)"]
+    end
+
+    subgraph MinHeap["3. Min-Heap Priority Queue: O(log N) Proactive TTL Purge"]
+        direction TB
+        RootHeap["Root Node: Earliest Expiring Record\nExpiresAt: 1728581000"]
+        HeapL["Left Child: ExpiresAt + 12s"]
+        HeapR["Right Child: ExpiresAt + 45s"]
+        RootHeap --> HeapL
+        RootHeap --> HeapR
+    end
+
+    Map -->|Pointer to node| Node1
+    Map -->|Pointer to node| Node2
+    Map -->|Pointer to node| TailNode
+
+    Node1 -.->|Pushed onto| RootHeap
+    Node2 -.->|Pushed onto| HeapL
+    TailNode -.->|Pushed onto| HeapR
+```
+
+### Key Cache Mechanisms:
+1. **$O(1)$ LRU Capacity Eviction:**
+   - On cache hit: the accessed node is unlinked and spliced to the head of the doubly-linked list in $O(1)$ time.
+   - When cache size reaches `MaxCapacity`: the node at `tail` is severed and deleted from both the list and the hash map in $O(1)$ time.
+2. **$O(\log N)$ Proactive TTL Expiration:**
+   - Every cached record is inserted into `std::priority_queue` Min-Heap keyed by `ExpiresAt = now + TTL`.
+   - The root of the Min-Heap always contains the earliest expiring record across the entire cache.
+   - Background sweeps or on-demand checks peek at the root: if `root.ExpiresAt > now`, the entire cache is guaranteed valid without scanning any other entries.
+3. **Dynamic TTL Aging:**
+   - Remaining TTL is dynamically computed on lookup:
+     $$\text{TTL}_{\text{remaining}} = \text{TTL}_{\text{original}} - (t_{\text{current}} - t_{\text{created}})$$
+   - Downstream clients receive strictly accurate, decaying TTL countdowns.
+4. **Thread Synchronization:**
+   - Multi-reader access protected by Windows `SRWLOCK`:
+     - Cache queries acquire **Shared Read Lock** (`AcquireSRWLockShared`).
+     - Cache insertions/evictions acquire **Exclusive Write Lock** (`AcquireSRWLockExclusive`).
+
+---
+
+## 5. Visual Wire Format & Label Decompression
+
+Engine E1 handles the raw binary serialization and deserialization compliant with **RFC 1035**.
+
+### DNS 12-Byte Header Wire Structure
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-------------------------------+-------------------------------+
+|        Transaction ID         |QR| Opcode |AA|TC|RD|RA| Z  | RCODE|
++-------------------------------+-------------------------------+
+|          QDCOUNT (1)          |          ANCOUNT (0/1)        |
++-------------------------------+-------------------------------+
+|          NSCOUNT (0)          |          ARCOUNT (0)          |
++-------------------------------+-------------------------------+
+```
+
+### Label Decompression & Cycle-Loop Guard
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Parser as Engine E1 Parser
+    participant Buffer as Datagram Byte Stream (512 bytes)
+    participant Depth as Recursion Guard (depth <= 16)
+
+    Parser->>Buffer: Read byte at cursor
+    alt Byte < 0xC0 (Normal Label)
+        Parser->>Buffer: Read length L; copy L bytes into domain string
+        Parser->>Parser: Append '.' and advance cursor by L + 1
+    else Byte >= 0xC0 (Compression Pointer)
+        Parser->>Depth: Increment depth counter
+        alt Depth > 16 (Cyclic Attack Detected)
+            Depth-->>Parser: ABORT: Cyclic Pointer Loop Detected!
+            Parser->>Parser: Trigger FORMERR (RCODE 1)
+        else Depth <= 16 (Valid Pointer)
+            Parser->>Buffer: Extract 14-bit pointer offset: (byte[0] & 0x3F) << 8 | byte[1]
+            Parser->>Buffer: Jump cursor to offset; continue decoding recursively
+        end
+    end
+```
+
+---
+
+## 6. Visual Concurrency & Thread Pool Architecture
+
+Engine E4 dispatches client requests concurrently using an OS worker thread pool to sustain high query volume without socket drops.
+
+```mermaid
+flowchart TD
+    subgraph NetworkThread["Main Reactor Thread (src/main.cpp)"]
+        ListenSocket["net.ListenUDP / Winsock2 Socket\nBinding to 127.0.0.1:8053"]
+        RecvLoop["Continuous recvfrom() Loop"]
+        CopyBuf["Allocate isolated packet slice\n(Prevents socket buffer race condition)"]
+        ListenSocket --> RecvLoop --> CopyBuf
+    end
+
+    subgraph ThreadPool["Worker Thread Pool (Engine E4 Concurrency)"]
+        Queue["Thread-Safe Transaction Queue\n[Mutex + Condition Variable]"]
+        Worker1["Worker Thread 1\n[Execute VM Pipeline]"]
+        Worker2["Worker Thread 2\n[Execute VM Pipeline]"]
+        Worker3["Worker Thread 3\n[Execute VM Pipeline]"]
+        WorkerN["Worker Thread N\n[Execute VM Pipeline]"]
+        
+        CopyBuf -->|Push Transaction| Queue
+        Queue -->|Pop Task| Worker1
+        Queue -->|Pop Task| Worker2
+        Queue -->|Pop Task| Worker3
+        Queue -->|Pop Task| WorkerN
+    end
+
+    subgraph SharedCache["Shared In-Memory Cache (Engine E2)"]
+        SRW["Win32 SRWLOCK (Reader-Writer Synchronization)"]
+        DataStore["LRU Hash Index + Min-Heap"]
+        Worker1 <-->|Read / Write| SRW
+        Worker2 <-->|Read / Write| SRW
+        Worker3 <-->|Read / Write| SRW
+        WorkerN <-->|Read / Write| SRW
+        SRW <--> DataStore
+    end
+```
+
+---
+
+## 7. Four Core Engines Decomposition (S1 Aligned)
+
+| Engine | Name & Student Owner | Academic Subject | Core Algorithms & C++ Mechanisms |
+| :---: | :--- | :--- | :--- |
+| **E1** | **Protocol Parsing & Wire Message Engine**<br>*(Vageesh Mathad)* | **Computer Networks** | • Raw byte-by-byte RFC 1035 wire parser.<br>• Header bitfield manipulation (`QR`, `Opcode`, `AA`, `TC`, `RD`, `RA`, `RCODE`).<br>• Recursion-bounded label pointer decompression (`0xC0`, max depth 16) with cycle-loop detection.<br>• Endianness conversions (`htons`/`ntohs`).<br>• Pointer compression response serializer (`0xC00C`). |
+| **E2** | **In-Memory DNS Storage & Cache Engine**<br>*(Mehak Sayed Yusuf)* | **DAA & DBMS** | • **$O(1)$ LRU Eviction**: `std::unordered_map` + Doubly-linked recency list.<br>• **$O(\log N)$ Min-Heap TTL Expiration**: `std::priority_queue` Min-Heap keyed by `ExpiresAt`.<br>• Dynamic TTL recalculation: $TTL_{rem} = TTL_{orig} - \Delta t$.<br>• Native Windows `SRWLOCK` Reader-Writer synchronization.<br>• Durability snapshot dump to `dns_cache.db` on graceful shutdown. |
+| **E3** | **Upstream Resolution & Forwarding Engine**<br>*(Ishani G)* | **Computer Networks & OS** | • Outbound UDP client sockets over Winsock2.<br>• Non-blocking `select()` polling with 2.0s timeout.<br>• Exponential retry backoff and failover from `8.8.8.8` to `1.1.1.1`.<br>• Kaminsky poisoning protection: Cryptographic 16-bit TxID validation. |
+| **E4** | **Query Execution VM & Telemetry Engine**<br>*(Joel Biju)* | **OSPP** | • 6-Stage VM Instruction Pipeline (`FETCH->DECODE->LOOKUP->RESOLVE->COMMIT->EMIT`).<br>• Condition handling matrix (`HIT`, `MISS`, `EXPIRED`, `NXDOMAIN` RFC 2308, `SERVFAIL`, `FORMERR`).<br>• Multi-threaded worker thread pool with thread-safe queue.<br>• Microsecond latency tracking (`std::chrono::high_resolution_clock`), hit ratio %, and QPS benchmarking. |
+
+---
+
+## 8. Implementation Phases & Milestones
 
 ```
 PHASE 0: Clean Slate & Build Toolchain       [COMPLETED]
@@ -142,76 +275,59 @@ PHASE 7: Main Server Loop & Multi-threading  [PENDING]
 PHASE 8: Complete C++ Viva Guide & Docs      [PENDING]
 ```
 
-### Detailed Phase Plan
+### Detailed Phase Breakdown
 
 #### Phase 2 — Engine E1: Protocol Parsing & Wire Message Engine
 - **Files:** `include/protocol_engine.hpp`, `src/protocol_engine.cpp`, `tests/test_protocol.cpp`
-- **Key Tasks:**
-  - Implement `DNSHeader` struct with bitfield manipulation (Flags, QR, Opcode, AA, TC, RD, RA, RCODE).
-  - Implement `DNSQuestion` struct with domain label decoder (e.g. `\x07example\x03com\x00` -> `example.com`).
-  - Implement `LabelDecompressor` with recursion depth counter (max 16) and cyclic pointer check.
-  - Implement `WireSerializer` to construct binary DNS response packets.
-  - Build automated unit tests in `tests/test_protocol.cpp`.
+- **Key Deliverables:**
+  - Header bitfield extraction, label pointer decompression with cycle detection (max depth 16), wire serializer.
+  - Automated unit tests in `tests/test_protocol.cpp`.
   - Validate with `make test_protocol`, update `CONTEXT.md`, update this Master Plan Guide, and git commit.
 
 #### Phase 3 — Engine E2: In-Memory DNS Storage & Cache Engine
 - **Files:** `include/storage_engine.hpp`, `src/storage_engine.cpp`, `tests/test_cache.cpp`
-- **Key Tasks:**
-  - Define `CompositeKey` (`domain`, `qtype`, `qclass`) with custom `std::hash`.
-  - Implement Doubly-Linked Recency List for $O(1)$ LRU cache capacity eviction.
-  - Implement Min-Heap priority queue for $O(\log N)$ proactive TTL expiration.
-  - Implement dynamic remaining TTL recalculation ($TTL_{rem} = TTL_{orig} - \Delta t$).
-  - Implement Reader-Writer locking via `SharedMutex` (`SRWLOCK`).
-  - Implement `SaveSnapshot()` and `LoadSnapshot()` for `dns_cache.db` disk persistence.
-  - Build automated unit tests in `tests/test_cache.cpp`.
+- **Key Deliverables:**
+  - Dual-index cache: Hash map + Doubly-linked list for $O(1)$ LRU; Min-Heap for proactive TTL expiration; dynamic TTL recalculation; `SRWLOCK` thread safety; disk snapshot persistence.
+  - Automated unit tests in `tests/test_cache.cpp`.
   - Validate with `make test_cache`, update `CONTEXT.md`, update this Master Plan Guide, and git commit.
 
 #### Phase 4 — Engine E3: Upstream Resolution & Network Forwarding Engine
 - **Files:** `include/upstream_engine.hpp`, `src/upstream_engine.cpp`, `tests/test_upstream.cpp`
-- **Key Tasks:**
-  - Implement non-blocking UDP socket wrapper with Winsock2.
-  - Implement `ResolveUpstream()` with 2.0s `select()` timeout and exponential retry backoff.
-  - Implement Kaminsky 16-bit TxID validation.
-  - Implement primary (8.8.8.8) and secondary (1.1.1.1) server failover.
-  - Build automated unit tests in `tests/test_upstream.cpp`.
+- **Key Deliverables:**
+  - Non-blocking UDP socket forwarder to 8.8.8.8, 2.0s timeout, exponential retries, randomized TxID matching.
+  - Automated unit tests in `tests/test_upstream.cpp`.
   - Validate with `make test_upstream`, update `CONTEXT.md`, update this Master Plan Guide, and git commit.
 
 #### Phase 5 — Engine E4: Query Execution Virtual Machine
 - **Files:** `include/vm_engine.hpp`, `src/vm_engine.cpp`, `tests/test_vm_integration.cpp`
-- **Key Tasks:**
-  - Implement the 6-stage pipeline: `FETCH -> DECODE -> LOOKUP -> RESOLVE -> COMMIT -> EMIT`.
-  - Implement condition handling matrix (`HIT`, `MISS`, `EXPIRED`, `NXDOMAIN`, `SERVFAIL`, `FORMERR`).
-  - Implement RFC 2308 negative caching for non-existent domains.
-  - Build end-to-end integration tests simulating complete client transactions.
+- **Key Deliverables:**
+  - 6-stage instruction pipeline (`FETCH->DECODE->LOOKUP->RESOLVE->COMMIT->EMIT`).
+  - Condition handling matrix (`HIT`, `MISS`, `EXPIRED`, `NXDOMAIN` negative cache, `SERVFAIL`, `FORMERR`).
+  - End-to-end integration tests simulating complete client transactions.
   - Validate with `make test_vm`, update `CONTEXT.md`, update this Master Plan Guide, and git commit.
 
 #### Phase 6 — Telemetry & KPI Benchmarking Subsystem
 - **Files:** `include/telemetry_engine.hpp`, `src/telemetry_engine.cpp`
-- **Key Tasks:**
-  - Implement atomic counters for total queries, cache hits, cache misses, and hit ratio %.
-  - Implement high-resolution microsecond latency timers (`std::chrono::high_resolution_clock`).
-  - Create live console telemetry dashboard renderer.
+- **Key Deliverables:**
+  - Real-time hit ratio tracking, microsecond latency histograms, console dashboard.
   - Update `CONTEXT.md`, update this Master Plan Guide, and git commit.
 
 #### Phase 7 — Server Main Entry Loop, Concurrency & Live Testing
 - **Files:** `src/main.cpp`
-- **Key Tasks:**
-  - Implement UDP socket listener on port 8053 with non-blocking reactor.
-  - Implement Worker Thread Pool to process incoming datagrams concurrently.
-  - Implement graceful shutdown handler (`SIGINT` / Ctrl+C) with cache snapshot persistence.
-  - Live testing with command-line tools: `dig @127.0.0.1 -p 8053 example.com` and `nslookup`.
+- **Key Deliverables:**
+  - UDP socket listener on port 8053 with worker thread pool.
+  - Live validation with `dig @127.0.0.1 -p 8053 example.com` and `nslookup`.
   - Update `CONTEXT.md`, update this Master Plan Guide, and git commit.
 
 #### Phase 8 — Comprehensive C++ Project Master Guide & Viva Prep
 - **Files:** `docs/CPP_MASTER_GUIDE.md`
-- **Key Tasks:**
+- **Key Deliverables:**
   - Complete viva defense guide with 30 in-depth professor questions & answers.
-  - Theoretical mapping to Computer Networks, OSPP, DAA, and DBMS.
   - Finalize all benchmarks, test outputs, and `CONTEXT.md`.
 
 ---
 
-## 5. Course Mapping Matrix for Faculty Viva
+## 9. Course Mapping Matrix for Faculty Viva
 
 | Subject | Where it appears in our C++ Code | Code Proof & Mechanism |
 | :--- | :--- | :--- |
@@ -222,7 +338,7 @@ PHASE 8: Complete C++ Viva Guide & Docs      [PENDING]
 
 ---
 
-## 6. Living Synchronization Protocol
+## 10. Living Synchronization Protocol
 
 1. **Continuous Updates:** Whenever code modifications, algorithm adjustments, or interface additions occur during implementation, they **MUST be synchronized back into this file**.
 2. **State Preservation:** Every phase completion is logged in [CONTEXT.md](file:///a:/dns-resolver-caching-server/CONTEXT.md).
