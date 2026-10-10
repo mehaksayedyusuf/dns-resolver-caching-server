@@ -137,7 +137,7 @@ dns-resolver-caching-server/
 
 ---
 
-## 👥 Team 11 (PES University)
+## 👥 Team 11 
 
 - **Mehak Sayed Yusuf** (`01fe24bci012`) — *Engine E2: In-Memory Storage & Cache Engine*
 - **Vageesh Mathad** (`01fe24bci008`) — *Engine E1: Protocol Parsing & Wire Message Engine*
