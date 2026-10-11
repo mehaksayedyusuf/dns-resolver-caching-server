@@ -54,6 +54,8 @@ $(BIN_DIR)/test_vm.exe: $(TEST_DIR)/test_vm_integration.cpp $(OBJS)
 	$(CXX) $(CXXFLAGS) $< $(OBJS) $(LDFLAGS) -o $@
 
 # Test Runner Targets
+test: test_protocol test_cache test_upstream test_vm
+
 test_protocol: $(BIN_DIR)/test_protocol.exe
 	@$(BIN_DIR)\test_protocol.exe
 
