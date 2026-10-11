@@ -44,8 +44,8 @@ $(BIN_DIR)/dns_server.exe: $(SRC_DIR)/main.cpp $(OBJS)
 $(BIN_DIR)/test_protocol.exe: $(TEST_DIR)/test_protocol.cpp $(BIN_DIR)/protocol_engine.o
 	$(CXX) $(CXXFLAGS) $< $(BIN_DIR)/protocol_engine.o $(LDFLAGS) -o $@
 
-$(BIN_DIR)/test_cache.exe: $(TEST_DIR)/test_cache.cpp $(BIN_DIR)/storage_engine.o
-	$(CXX) $(CXXFLAGS) $< $(BIN_DIR)/storage_engine.o $(LDFLAGS) -o $@
+$(BIN_DIR)/test_cache.exe: $(TEST_DIR)/test_cache.cpp $(BIN_DIR)/storage_engine.o $(BIN_DIR)/protocol_engine.o
+	$(CXX) $(CXXFLAGS) $< $(BIN_DIR)/storage_engine.o $(BIN_DIR)/protocol_engine.o $(LDFLAGS) -o $@
 
 $(BIN_DIR)/test_upstream.exe: $(TEST_DIR)/test_upstream.cpp $(BIN_DIR)/upstream_engine.o $(BIN_DIR)/protocol_engine.o
 	$(CXX) $(CXXFLAGS) $< $(BIN_DIR)/upstream_engine.o $(BIN_DIR)/protocol_engine.o $(LDFLAGS) -o $@
