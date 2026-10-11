@@ -73,8 +73,14 @@ a:/dns-resolver-caching-server/
 │   ├── test_cache.cpp                         # 8 unit tests for Engine E2 (Passed)
 │   ├── test_upstream.cpp                      # 6 unit tests for Engine E3 (Passed)
 │   └── test_vm_integration.cpp               # 6 integration tests for Engine E4 (Passed)
+├── benchmarks/                                # Concurrency stress test reports & metrics
+│   ├── BENCHMARK_REPORT.md                    # Stress test analysis & latency percentiles
+│   ├── benchmark_hit.json                     # Pure cache hit 500-query benchmark results
+│   ├── benchmark_hit_1000.json                # Pure cache hit 1000-query (6538 QPS) results
+│   └── benchmark_mixed.json                   # 80/20 mixed workload benchmark results
 ├── scripts/
-│   └── live_client.py                         # Live query benchmarking tool
+│   ├── live_client.py                         # Single-query live verification tool
+│   └── benchmark_stress.py                    # Multi-threaded concurrent stress test tool
 └── bin/
     └── dns_server.exe                         # Production binary executable
 ```

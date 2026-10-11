@@ -38,5 +38,6 @@ PROJECT_RULES.md
 VERSION
 adapters/
 model_capabilities.yaml
-scripts/
+scripts/*
+!scripts/*.py
 generate_all_highres_diagrams.py
