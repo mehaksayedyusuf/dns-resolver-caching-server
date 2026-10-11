@@ -26,7 +26,7 @@
 | **Phase 5** | **Engine E4: Query Execution Virtual Machine**<br>• `include/vm_engine.hpp` and `src/vm_engine.cpp`.<br>• 6-stage instruction pipeline (`FETCH->DECODE->LOOKUP->RESOLVE->COMMIT->EMIT`).<br>• Condition handling: `HIT`, `MISS`, `EXPIRED`, `NXDOMAIN` (RFC 2308 negative cache), `SERVFAIL`, `FORMERR`.<br>• Integration tests in `tests/test_vm_integration.cpp` (6/6 tests passed). | **COMPLETED** | `feat(phase-5)` |
 | **Phase 6** | **Telemetry & Performance Analytics Subsystem**<br>• `include/telemetry_engine.hpp` and `src/telemetry_engine.cpp`.<br>• Real-time hit ratio tracking, microsecond latency histograms, QPS counters, live dashboard. | **COMPLETED** | `feat(phase-5)` |
 | **Phase 7** | **Server Main Entry, Multi-Threaded Worker Pool & Live Validation**<br>• `src/main.cpp` listening on UDP `127.0.0.1:8053`.<br>• Worker thread pool with queue concurrency.<br>• Live validation with Python/nslookup (121.26ms miss ➔ 0.85ms hit, 140x speedup). | **COMPLETED** | `feat(phase-7)` |
-| **Phase 8** | **New C++ Master Guide & Project Report**<br>• `docs/CPP_MASTER_GUIDE.md` (Theory, Engine Walkthroughs, Viva Q&A, CN/OSPP/DAA mapping). | *Pending* | - |
+| **Phase 8** | **New C++ Master Guide & Project Report**<br>• `docs/CPP_MASTER_GUIDE.md` (Theory, Engine Walkthroughs, 30 Viva Q&As, CN/OSPP/DAA/DBMS mapping, Test & Live benchmarks). | **COMPLETED** | `docs(phase-8)` |
 
 ---
 
@@ -52,12 +52,31 @@ a:/dns-resolver-caching-server/
 │   └── concurrency_threadpool_diagram.png     # Reactor, Thread Pool & SRWLOCK (407 KB)
 ├── docs/
 │   ├── CPP_MASTER_PLAN.md                     # Synchronized Master Plan
+│   ├── CPP_MASTER_GUIDE.md                    # Comprehensive Viva Defense Report & Q&A
 │   └── diagrams/                              # Mirrored architectural assets
 ├── include/
-│   └── common.hpp                             # RFC 1035 constants, RAII Mutex & SRWLOCK wrappers
-├── src/                                       # (Will contain engine implementations)
-├── tests/                                     # (Will contain modular unit tests)
-└── bin/                                       # Build output directory
+│   ├── common.hpp                             # RFC 1035 constants, RAII Mutex & SRWLOCK wrappers
+│   ├── protocol_engine.hpp                    # E1: Wire Parser & Serializer definitions
+│   ├── storage_engine.hpp                     # E2: Dual-index LRU + Min-Heap Cache definitions
+│   ├── upstream_engine.hpp                    # E3: Upstream UDP Forwarder & Kaminsky defense
+│   ├── vm_engine.hpp                          # E4: Query Execution VM Pipeline definitions
+│   └── telemetry_engine.hpp                   # Telemetry & KPI metric tracking definitions
+├── src/
+│   ├── protocol_engine.cpp                    # E1: Wire unpacking, label decompression
+│   ├── storage_engine.cpp                     # E2: LRU splice, TTL minheap, disk snapshot
+│   ├── upstream_engine.cpp                    # E3: Non-blocking UDP select(), retry, TxID
+│   ├── vm_engine.cpp                          # E4: 6-stage pipeline executor
+│   ├── telemetry_engine.cpp                   # Telemetry analytics & dashboard
+│   └── main.cpp                               # Server entry, Reactor loop, thread pool
+├── tests/
+│   ├── test_protocol.cpp                      # 10 unit tests for Engine E1 (Passed)
+│   ├── test_cache.cpp                         # 8 unit tests for Engine E2 (Passed)
+│   ├── test_upstream.cpp                      # 6 unit tests for Engine E3 (Passed)
+│   └── test_vm_integration.cpp               # 6 integration tests for Engine E4 (Passed)
+├── scripts/
+│   └── live_client.py                         # Live query benchmarking tool
+└── bin/
+    └── dns_server.exe                         # Production binary executable
 ```
 
 ---
