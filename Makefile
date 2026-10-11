@@ -53,8 +53,22 @@ $(BIN_DIR)/test_upstream.exe: $(TEST_DIR)/test_upstream.cpp $(BIN_DIR)/upstream_
 $(BIN_DIR)/test_vm.exe: $(TEST_DIR)/test_vm_integration.cpp $(OBJS)
 	$(CXX) $(CXXFLAGS) $< $(OBJS) $(LDFLAGS) -o $@
 
-.PHONY: all test clean
+# Test Runner Targets
+test_protocol: $(BIN_DIR)/test_protocol.exe
+	@$(BIN_DIR)\test_protocol.exe
+
+test_cache: $(BIN_DIR)/test_cache.exe
+	@$(BIN_DIR)\test_cache.exe
+
+test_upstream: $(BIN_DIR)/test_upstream.exe
+	@$(BIN_DIR)\test_upstream.exe
+
+test_vm: $(BIN_DIR)/test_vm.exe
+	@$(BIN_DIR)\test_vm.exe
+
+.PHONY: all test clean test_protocol test_cache test_upstream test_vm
 
 clean:
 	@if exist $(BIN_DIR)\*.o del /Q $(BIN_DIR)\*.o
 	@if exist $(BIN_DIR)\*.exe del /Q $(BIN_DIR)\*.exe
+
