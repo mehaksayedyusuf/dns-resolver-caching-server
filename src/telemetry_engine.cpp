@@ -26,14 +26,20 @@ void TelemetryEngine::record_query_completed(const std::string& condition, uint3
         cache_misses_++;
     } else if (condition == "CACHE_EXPIRED") {
         cache_expired_++;
+        cache_misses_++;
     } else if (condition == "UPSTREAM_SUCCESS") {
         upstream_success_++;
+        cache_misses_++;
+    } else if (condition == "UPSTREAM_NXDOMAIN") {
+        cache_misses_++;
     } else if (condition == "UPSTREAM_TIMEOUT") {
+        cache_misses_++;
         upstream_timeouts_++;
         servfails_++;
     } else if (condition == "FORMERR_MALFORMED") {
         formerrs_++;
     } else if (condition == "SERVFAIL_ERROR") {
+        cache_misses_++;
         servfails_++;
     }
 }
@@ -67,7 +73,7 @@ TelemetrySnapshot TelemetryEngine::get_snapshot() const {
     uint64_t tot_lat = total_latency_us_.load();
     snap.avg_latency_us = (snap.total_queries > 0) ? (static_cast<double>(tot_lat) / snap.total_queries) : 0.0;
 
-    uint64_t total_lookups = snap.cache_hits + snap.cache_misses + snap.cache_expired + snap.negative_hits;
+    uint64_t total_lookups = snap.cache_hits + snap.cache_misses + snap.negative_hits;
     if (total_lookups > 0) {
         snap.hit_ratio_pct = (static_cast<double>(snap.cache_hits + snap.negative_hits) / total_lookups) * 100.0;
     } else {

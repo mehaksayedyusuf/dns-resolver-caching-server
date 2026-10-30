@@ -337,6 +337,70 @@ bool test_telemetry_metrics_accumulation() {
 }
 
 // ============================================================================
+// Test 7: Repeated Queries for Same Domain & Accurate Telemetry
+// ============================================================================
+bool test_repeated_domain_resolution_and_telemetry() {
+    uint16_t mock_port = 18062;
+    MockUpstreamCtx mock_ctx;
+    mock_ctx.port = mock_port;
+    mock_ctx.rcode_to_return = RCODE_NOERROR;
+    mock_ctx.respond = true;
+
+    HANDLE thread = CreateThread(NULL, 0, MockUpstreamServerThread, &mock_ctx, 0, NULL);
+    while (!mock_ctx.ready) Sleep(10);
+
+    StorageEngine cache(50);
+    UpstreamConfig up_cfg;
+    up_cfg.primary_server = "127.0.0.1";
+    up_cfg.primary_port = mock_port;
+    up_cfg.fallback_server = "";
+    up_cfg.timeout_ms = 1000;
+
+    UpstreamEngine upstream(up_cfg);
+    TelemetryEngine telemetry;
+    VMEngine vm(cache, upstream, telemetry);
+
+    // Query 1: Initial query -> Cache MISS -> Upstream resolution -> Commit
+    std::vector<uint8_t> q1 = make_query_wire(0xA001, "repeat.com");
+    VMTransaction tx1;
+    tx1.inbound_raw = q1;
+    bool ok1 = vm.process_transaction(tx1);
+    TEST_ASSERT(ok1, "Tx1 failed");
+    TEST_ASSERT(tx1.condition == VMCondition::UPSTREAM_SUCCESS, "Tx1 expected UPSTREAM_SUCCESS");
+
+    // Query 2: Repeated query for same domain -> Cache HIT
+    std::vector<uint8_t> q2 = make_query_wire(0xA002, "repeat.com");
+    VMTransaction tx2;
+    tx2.inbound_raw = q2;
+    bool ok2 = vm.process_transaction(tx2);
+    TEST_ASSERT(ok2, "Tx2 failed");
+    TEST_ASSERT(tx2.condition == VMCondition::CACHE_HIT, "Tx2 expected CACHE_HIT");
+    TEST_ASSERT(tx2.response_packet.answers.size() == 1, "Tx2 expected 1 cached answer");
+
+    // Query 3: Another repeated query -> Cache HIT
+    std::vector<uint8_t> q3 = make_query_wire(0xA003, "repeat.com");
+    VMTransaction tx3;
+    tx3.inbound_raw = q3;
+    bool ok3 = vm.process_transaction(tx3);
+    TEST_ASSERT(ok3, "Tx3 failed");
+    TEST_ASSERT(tx3.condition == VMCondition::CACHE_HIT, "Tx3 expected CACHE_HIT");
+
+    // Verify Telemetry Snapshot accuracy
+    TelemetrySnapshot snap = telemetry.get_snapshot();
+    TEST_ASSERT(snap.total_queries == 3, "Total queries should be exactly 3");
+    TEST_ASSERT(snap.cache_hits == 2, "Cache hits should be exactly 2");
+    TEST_ASSERT(snap.cache_misses == 1, "Cache misses should be exactly 1");
+    TEST_ASSERT(snap.upstream_success == 1, "Upstream success should be exactly 1");
+    TEST_ASSERT(snap.hit_ratio_pct >= 66.0 && snap.hit_ratio_pct <= 67.0, "Hit ratio should be 66.67%");
+
+    mock_ctx.respond = false;
+    WaitForSingleObject(thread, 2000);
+    CloseHandle(thread);
+
+    return true;
+}
+
+// ============================================================================
 // Test Runner Main
 // ============================================================================
 int main() {
@@ -354,6 +418,7 @@ int main() {
     RUN_TEST(test_pipeline_servfail_on_timeout);
     RUN_TEST(test_pipeline_execution_trace);
     RUN_TEST(test_telemetry_metrics_accumulation);
+    RUN_TEST(test_repeated_domain_resolution_and_telemetry);
 
     std::cout << COLOR_YELLOW << "--------------------------------------------------------" << COLOR_RESET << std::endl;
     std::cout << "Test Summary: " << g_tests_passed << "/" << g_tests_run << " passed." << std::endl;

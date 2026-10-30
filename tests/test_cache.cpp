@@ -320,6 +320,78 @@ bool test_snapshot_persistence() {
 }
 
 // ============================================================================
+// Test 9: Domain, Record Type, and Class Cache Key Isolation
+// ============================================================================
+bool test_cache_type_and_class_isolation() {
+    StorageEngine cache(50);
+
+    // Cache Type A (IPv4)
+    std::vector<DNSResourceRecord> r_a = { DNSResourceRecord::create_a("example.com", 300, "93.184.216.34") };
+    cache.put("example.com", QTYPE_A, QCLASS_IN, r_a, 300);
+
+    // Cache Type AAAA (IPv6)
+    std::vector<DNSResourceRecord> r_aaaa = { DNSResourceRecord::create_aaaa("example.com", 300, "2606:2800:220:1:248:1893:25c8:1946") };
+    cache.put("example.com", QTYPE_AAAA, QCLASS_IN, r_aaaa, 300);
+
+    std::vector<DNSResourceRecord> out;
+    uint8_t rcode = 0;
+
+    // Type A query must return IPv4
+    CacheVerdict v_a = cache.get("example.com", QTYPE_A, QCLASS_IN, out, rcode);
+    TEST_ASSERT(v_a == CacheVerdict::HIT, "Type A lookup should be HIT");
+    TEST_ASSERT(out.size() == 1, "Expected 1 A record");
+    TEST_ASSERT(out[0].readable_data == "93.184.216.34", "IPv4 address mismatch");
+
+    // Type AAAA query must return IPv6
+    CacheVerdict v_aaaa = cache.get("example.com", QTYPE_AAAA, QCLASS_IN, out, rcode);
+    TEST_ASSERT(v_aaaa == CacheVerdict::HIT, "Type AAAA lookup should be HIT");
+    TEST_ASSERT(out.size() == 1, "Expected 1 AAAA record");
+    TEST_ASSERT(out[0].readable_data == "2606:2800:220:1:248:1893:25c8:1946", "IPv6 address mismatch");
+
+    // Type MX query must be a MISS (distinct key)
+    CacheVerdict v_mx = cache.get("example.com", QTYPE_MX, QCLASS_IN, out, rcode);
+    TEST_ASSERT(v_mx == CacheVerdict::MISS, "Uncached Type MX should be MISS");
+
+    // Different class query must be a MISS
+    CacheVerdict v_cls = cache.get("example.com", QTYPE_A, 3 /* Chaos class */, out, rcode);
+    TEST_ASSERT(v_cls == CacheVerdict::MISS, "Different class should be MISS");
+
+    return true;
+}
+
+// ============================================================================
+// Test 10: Cache Statistics and Expiration Accuracy
+// ============================================================================
+bool test_cache_stats_and_expiration_accuracy() {
+    StorageEngine cache(10);
+    cache.reset_stats();
+
+    std::vector<DNSResourceRecord> r = { DNSResourceRecord::create_a("ephemeral.com", 1, "192.168.1.1") };
+    cache.put("ephemeral.com", QTYPE_A, QCLASS_IN, r, 1);
+
+    // Initial query -> HIT
+    std::vector<DNSResourceRecord> out;
+    uint8_t rcode = 0;
+    TEST_ASSERT(cache.get("ephemeral.com", QTYPE_A, QCLASS_IN, out, rcode) == CacheVerdict::HIT, "Initial lookup must HIT");
+
+    // Wait 1.2s for expiration
+    Sleep(1200);
+
+    // Query expired record -> EXPIRED (counted as miss)
+    CacheVerdict v_exp = cache.get("ephemeral.com", QTYPE_A, QCLASS_IN, out, rcode);
+    TEST_ASSERT(v_exp == CacheVerdict::EXPIRED, "Expired record must return EXPIRED");
+    TEST_ASSERT(cache.size() == 0, "Expired entry must be erased from cache");
+
+    CacheStats s = cache.get_stats();
+    TEST_ASSERT(s.hits == 1, "Hits must be 1");
+    TEST_ASSERT(s.misses == 1, "Misses must be 1 (expired lookup is a miss)");
+    TEST_ASSERT(s.expirations == 1, "Expirations must be 1");
+    TEST_ASSERT(s.hit_ratio() == 50.0, "Hit ratio must be exactly 50.0%");
+
+    return true;
+}
+
+// ============================================================================
 // Test Runner Main
 // ============================================================================
 int main() {
@@ -336,6 +408,8 @@ int main() {
     RUN_TEST(test_negative_caching_rfc2308);
     RUN_TEST(test_thread_concurrency);
     RUN_TEST(test_snapshot_persistence);
+    RUN_TEST(test_cache_type_and_class_isolation);
+    RUN_TEST(test_cache_stats_and_expiration_accuracy);
 
     std::cout << COLOR_YELLOW << "--------------------------------------------------------" << COLOR_RESET << std::endl;
     std::cout << "Test Summary: " << g_tests_passed << "/" << g_tests_run << " passed." << std::endl;

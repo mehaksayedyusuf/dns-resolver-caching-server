@@ -42,6 +42,7 @@ CacheVerdict StorageEngine::get(const std::string& domain, uint16_t qtype, uint1
     auto list_it = it->second;
     if (list_it->is_expired()) {
         stats_.expirations++;
+        stats_.misses++;
         lru_list_.erase(list_it);
         hash_index_.erase(it);
         return CacheVerdict::EXPIRED;
@@ -51,6 +52,7 @@ CacheVerdict StorageEngine::get(const std::string& domain, uint16_t qtype, uint1
     int64_t rem_ttl = list_it->remaining_ttl_seconds();
     if (rem_ttl <= 0) {
         stats_.expirations++;
+        stats_.misses++;
         lru_list_.erase(list_it);
         hash_index_.erase(it);
         return CacheVerdict::EXPIRED;
@@ -171,7 +173,7 @@ CacheVerdict StorageEngine::peek(const std::string& domain, uint16_t qtype, uint
 void StorageEngine::evict_lru_tail_locked() {
     if (lru_list_.empty()) return;
 
-    const auto& tail_key = lru_list_.back().key;
+    CacheKey tail_key = lru_list_.back().key;
     hash_index_.erase(tail_key);
     lru_list_.pop_back();
     stats_.evictions++;
@@ -405,6 +407,11 @@ bool StorageEngine::load_snapshot(const std::string& filepath) {
             hash_index_[key] = lru_list_.begin();
             min_heap_.push({expires_at, key, version});
         }
+    }
+
+    // Ensure capacity bound is strictly enforced after loading snapshot
+    while (hash_index_.size() > max_capacity_ && !lru_list_.empty()) {
+        evict_lru_tail_locked();
     }
 
     return true;

@@ -6,6 +6,7 @@
 #include "vm_engine.hpp"
 
 #include <iostream>
+#include <iomanip>
 #include <vector>
 #include <queue>
 #include <string>
@@ -105,24 +106,55 @@ private:
             std::string client_ip = inet_ntoa(task.client_addr.sin_addr);
             uint16_t client_port = ntohs(task.client_addr.sin_port);
 
-            std::cout << "[WORKER] Ingested query (" << task.buffer.size()
-                      << "B) from " << client_ip << ":" << client_port << "...\n";
+            VMTransaction tx;
+            tx.client_ip = client_ip;
+            tx.client_port = client_port;
+            tx.inbound_raw = std::move(task.buffer);
 
-            std::vector<uint8_t> response_wire = vm_.process_raw_query(
-                task.buffer.data(), task.buffer.size(), client_ip, client_port
-            );
+            vm_.process_transaction(tx);
+
+            // Log detailed query outcome and cache verification
+            std::string qname = !tx.query_packet.questions.empty() ? tx.query_packet.questions[0].qname : "<malformed>";
+            std::string qtype_str = !tx.query_packet.questions.empty() ? ProtocolEngine::qtype_to_string(tx.query_packet.questions[0].qtype) : "";
+            double lat_ms = tx.latency_microseconds / 1000.0;
+
+            if (tx.condition == VMCondition::CACHE_HIT) {
+                uint32_t rem_ttl = !tx.response_packet.answers.empty() ? tx.response_packet.answers[0].ttl : 0;
+                std::cout << "[CACHE HIT] " << qname << " (" << qtype_str << ") -> "
+                          << tx.response_packet.answers.size() << " answer(s) in "
+                          << std::fixed << std::setprecision(2) << lat_ms << "ms (remaining TTL: "
+                          << rem_ttl << "s)\n";
+            } else if (tx.condition == VMCondition::CACHE_NEGATIVE_HIT) {
+                std::cout << "[CACHE NEGATIVE HIT] " << qname << " -> NXDOMAIN in "
+                          << std::fixed << std::setprecision(2) << lat_ms << "ms\n";
+            } else if (tx.condition == VMCondition::UPSTREAM_SUCCESS) {
+                std::cout << "[CACHE MISS -> RESOLVED] " << qname << " (" << qtype_str << ") -> "
+                          << tx.response_packet.answers.size() << " answer(s) from upstream in "
+                          << std::fixed << std::setprecision(2) << lat_ms << "ms (saved to cache)\n";
+            } else if (tx.condition == VMCondition::UPSTREAM_NXDOMAIN) {
+                std::cout << "[CACHE MISS -> NXDOMAIN] " << qname << " -> NXDOMAIN from upstream in "
+                          << std::fixed << std::setprecision(2) << lat_ms << "ms (negative cached)\n";
+            } else if (tx.condition == VMCondition::CACHE_EXPIRED) {
+                std::cout << "[CACHE EXPIRED] " << qname << " (" << qtype_str << ") -> Refreshed from upstream in "
+                          << std::fixed << std::setprecision(2) << lat_ms << "ms\n";
+            } else if (tx.condition == VMCondition::UPSTREAM_TIMEOUT) {
+                std::cout << "[UPSTREAM TIMEOUT] " << qname << " -> SERVFAIL in "
+                          << std::fixed << std::setprecision(2) << lat_ms << "ms\n";
+            } else if (tx.condition == VMCondition::FORMERR_MALFORMED) {
+                std::cout << "[FORMERR] Malformed query from " << client_ip << ":" << client_port << "\n";
+            } else {
+                std::cout << "[RESOLVED] " << qname << " (" << VMEngine::condition_to_string(tx.condition) << ") in "
+                          << std::fixed << std::setprecision(2) << lat_ms << "ms\n";
+            }
 
             // Transmit serialized response datagram back to client
-            if (!response_wire.empty()) {
-                int sent = sendto(listen_socket_, reinterpret_cast<const char*>(response_wire.data()),
-                                  static_cast<int>(response_wire.size()), 0,
+            if (!tx.outbound_raw.empty()) {
+                int sent = sendto(listen_socket_, reinterpret_cast<const char*>(tx.outbound_raw.data()),
+                                  static_cast<int>(tx.outbound_raw.size()), 0,
                                   reinterpret_cast<struct sockaddr*>(&task.client_addr),
                                   sizeof(task.client_addr));
                 if (sent == SOCKET_ERROR) {
                     std::cerr << "[WORKER] sendto failed: " << WSAGetLastError() << "\n";
-                } else {
-                    std::cout << "[WORKER] Dispatched response (" << sent
-                              << "B) to " << client_ip << ":" << client_port << "\n";
                 }
             }
         }
@@ -252,6 +284,7 @@ int main(int argc, char* argv[]) {
     print_banner(port, upstream_ip, cache_capacity, worker_threads);
 
     auto last_telemetry_time = std::chrono::steady_clock::now();
+    auto last_sweep_time = std::chrono::steady_clock::now();
 
     // Main Network Reactor Event Loop
     while (g_running) {
@@ -279,8 +312,20 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Print telemetry every 30 seconds if active queries exist
         auto now = std::chrono::steady_clock::now();
+
+        // Proactive TTL sweep every 5 seconds (Engine E2 Min-Heap)
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_sweep_time).count() >= 5) {
+            size_t purged = cache_engine.purge_expired();
+            if (purged > 0) {
+                std::cout << "[CACHE SWEEP] Proactively evicted " << purged
+                          << " expired record(s) via Min-Heap. Active cache size: "
+                          << cache_engine.size() << "/" << cache_capacity << "\n";
+            }
+            last_sweep_time = now;
+        }
+
+        // Print telemetry every 30 seconds if active queries exist
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_telemetry_time).count() >= 30) {
             TelemetrySnapshot snap = telemetry_engine.get_snapshot();
             if (snap.total_queries > 0) {

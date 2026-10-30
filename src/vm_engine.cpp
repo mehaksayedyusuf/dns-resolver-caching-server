@@ -134,8 +134,12 @@ bool VMEngine::stage_resolve(VMTransaction& tx) {
         tx.condition = VMCondition::UPSTREAM_NXDOMAIN;
         tx.response_packet = up_res.response_packet;
         const auto& q = tx.query_packet.questions[0];
-        cache_.put(q.qname, q.qtype, q.qclass, {}, 60, true, RCODE_NXDOMAIN);
-        tx.log_trace("RESOLVE: NXDOMAIN (Negative Cache 60s)");
+        uint32_t neg_ttl = 60;
+        if (!up_res.response_packet.authorities.empty() && up_res.response_packet.authorities[0].ttl > 0) {
+            neg_ttl = std::min(up_res.response_packet.authorities[0].ttl, 300u);
+        }
+        cache_.put(q.qname, q.qtype, q.qclass, {}, neg_ttl, true, RCODE_NXDOMAIN);
+        tx.log_trace("RESOLVE: NXDOMAIN (Negative Cache " + std::to_string(neg_ttl) + "s)");
         tx.current_stage = VMStage::STAGE_EMIT;
         return true;
     }
@@ -156,7 +160,7 @@ bool VMEngine::stage_commit(VMTransaction& tx) {
                 min_ttl = rr.ttl;
             }
         }
-        if (min_ttl == 0) min_ttl = 60;
+        if (min_ttl == 0) min_ttl = 1;
 
         cache_.put(q.qname, q.qtype, q.qclass, tx.response_packet.answers, min_ttl);
         tx.log_trace("COMMIT: Saved to cache (TTL: " + std::to_string(min_ttl) + "s)");
