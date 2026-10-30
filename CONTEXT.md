@@ -79,7 +79,7 @@ a:/dns-resolver-caching-server/
 │   ├── benchmark_hit_1000.json                # Pure cache hit 1000-query (6538 QPS) results
 │   └── benchmark_mixed.json                   # 80/20 mixed workload benchmark results
 ├── scripts/
-│   ├── live_client.py                         # Single-query live verification tool
+│   ├── live_client.py                         # Interactive manual lookup & live verification client
 │   └── benchmark_stress.py                    # Multi-threaded concurrent stress test tool
 └── bin/
     └── dns_server.exe                         # Production binary executable
