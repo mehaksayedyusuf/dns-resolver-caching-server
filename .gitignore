@@ -1,41 +1,51 @@
-# Compiled binaries and objects
+# Build output
 bin/
 obj/
 *.o
 *.exe
 *.out
 
-# Cache database files (runtime artifacts)
+# Runtime artifacts
 *.db
 dns_cache*.db
 
-# Python bytecode
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# OS artifacts
+# OS
 .DS_Store
 Thumbs.db
 
-# Editor directories
+# Editor
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Agent / AI tooling (not part of the project)
+# AI agent tooling (not part of the project)
 .agent/
 .agents/
 .gsd/
 .gemini/
 adapters/
+GSD-STYLE.md
+PROJECT_RULES.md
+VERSION
+model_capabilities.yaml
 
-# Build artifacts from scripts
-*.pdf.tmp
-*.docx.tmp
-
-# Temporary and scratch files
-scratch/
-*.log
+# Diagram/doc generation scripts (outputs kept, scripts excluded)
+generate_all_highres_diagrams.py
+scripts/build_14page_*.py
+scripts/fill_sprint1_docx.py
+scripts/generate_*.py
+scripts/test_imports.py
+scripts/test_word_export.py
+scripts/verify_pdf.py
+scripts/search_repo.*
+scripts/setup_search.*
+scripts/validate-*.ps1
+scripts/validate-*.sh
+docs/diagrams/
