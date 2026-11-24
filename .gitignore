@@ -1,43 +1,41 @@
-# C++ Build Artifacts
-*.o
-*.obj
-*.exe
-*.dll
-*.so
-*.dylib
-*.a
-*.lib
-
-# Output directories
+# Compiled binaries and objects
 bin/
-build/
-dist/
-
-# Test binaries & dumps
-*.test
+obj/
+*.o
+*.exe
 *.out
-*.log
 
-# Runtime persistent storage
-dns_cache.db
+# Cache database files (runtime artifacts)
 *.db
+dns_cache*.db
 
-# Environment & IDE
-.env
-.idea/
-.vscode/
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS artifacts
 .DS_Store
+Thumbs.db
 
-# Agent & Workflow Tooling
+# Editor directories
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Agent / AI tooling (not part of the project)
 .agent/
 .agents/
-.gemini/
 .gsd/
-GSD-STYLE.md
-PROJECT_RULES.md
-VERSION
+.gemini/
 adapters/
-model_capabilities.yaml
-scripts/*
-!scripts/*.py
-generate_all_highres_diagrams.py
+
+# Build artifacts from scripts
+*.pdf.tmp
+*.docx.tmp
+
+# Temporary and scratch files
+scratch/
+*.log
