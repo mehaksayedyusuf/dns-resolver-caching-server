@@ -1,107 +1,136 @@
-# DNS Resolver & Caching Server (C++)
+# DNS Resolver & Caching Server — Distributed VM Multi-Cluster (C++)
 
 [![Language: C++](https://img.shields.io/badge/Language-C%2B%2B14%2F17-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org/)
 [![RFC: 1035 Compliant](https://img.shields.io/badge/RFC-1035%20DNS-blue.svg)](https://www.ietf.org/rfc/rfc1035.txt)
-[![Networking: Winsock2](https://img.shields.io/badge/Network-Winsock2%20(UDP)-orange.svg)](https://learn.microsoft.com/en-us/windows/win32/winsock/windows-sockets-start-page-2)
+[![Platform: Cross-Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-orange.svg)]()
+[![Deployment: VMware Workstation Pro](https://img.shields.io/badge/Deploy-VMware%20Workstation%20Pro-green.svg)]()
 [![Academic Theme: Network Systems](https://img.shields.io/badge/Theme-Network%20Systems%20%26%20Tools-success.svg)]()
-[![Team: 11](https://img.shields.io/badge/Team-11%20-purple.svg)]()
+[![Team: 11](https://img.shields.io/badge/Team-11-purple.svg)]()
 
-An RFC 1035 compliant **DNS Resolver and In-Memory Caching Server** built from scratch in **C++** using **Windows Sockets 2 (`ws2_32`)** and native Windows synchronization primitives (`SRWLOCK`).
+An RFC 1035 compliant **DNS Resolver and In-Memory Caching Server** built in **C++14/17**, deployed as a **Distributed VM Multi-Cluster Client-Server System** running on **VMware Workstation Pro**.
 
-The system ingests raw UDP datagrams on port `8053`, unpacks DNS wire bitfields without external libraries, resolves domain queries concurrently using a worker thread pool, and accelerates lookups using a dual-indexed cache combining **$O(1)$ LRU capacity eviction** with an **$O(\log N)$ Min-Heap for proactive TTL expiration**.
+The server ingests raw UDP datagrams, unpacks DNS wire bitfields without external libraries, resolves queries concurrently using a worker thread pool, and accelerates lookups using a dual-indexed cache combining **O(1) LRU capacity eviction** with an **O(log N) Min-Heap for proactive TTL expiration**.
+
+The architecture is fully **cross-platform** (Linux inside VMs + Windows on host), with multiple cluster nodes reachable from any client over the VMware virtual network.
 
 ---
 
-## 🏛️ System Orbit Architecture
+## 🏛️ VM Multi-Cluster Architecture
 
-![System Orbit Architecture](diagrams/system_orbit_diagram.png)
+```
++----------------------------------------------------------------------------------------------------------+
+|                                    VMWARE WORKSTATION PRO HOST (LAPTOP)                                  |
+|                                                                                                          |
+|   CLIENT TIER                                                                                            |
+|   • Host OS Terminal (Windows) → dig @192.168.150.10 -p 8053 google.com A                               |
+|   • Python Cluster Client      → python scripts/cluster_client.py --mode failover                       |
+|   • Client VM (Ubuntu Desktop) → RFC 1035 UDP queries                                                   |
+|                                          |  Port 8053                                                   |
+|                                          ▼                                                               |
+|   VMNET8 VIRTUAL NETWORK SWITCH (NAT: 192.168.150.0/24)                                                 |
+|           |  [Primary]                                     |  [Secondary / Failover]                    |
+|           ▼                                                ▼                                             |
+|   ┌─────────────────────────┐  Inter-Cluster    ┌─────────────────────────┐                             |
+|   │  CLUSTER-ALPHA (VM 1)   │◄═══Cache Peering══►│  CLUSTER-BETA (VM 2)   │                             |
+|   │  Ubuntu: 192.168.150.10 │                   │  Ubuntu: 192.168.150.20 │                             |
+|   │  E1: Wire Parser        │                   │  E1: Wire Parser        │                             |
+|   │  E2: Dual-Index Cache   │                   │  E2: Dual-Index Cache   │                             |
+|   │  E3: Upstream Forwarder │                   │  E3: Upstream Forwarder │                             |
+|   │  E4: 6-Stage VM         │                   │  E4: 6-Stage VM         │                             |
+|   │  E5: Telemetry          │                   │  E5: Telemetry          │                             |
+|   │  DB: dns_cache_alpha.db │                   │  DB: dns_cache_beta.db  │                             |
+|   └─────────────────────────┘                   └─────────────────────────┘                             |
+|                        \                              /                                                  |
+|                         ▼  External Recursive DNS    ▼                                                  |
+|            Primary: 8.8.8.8:53  |  Secondary (Failover): 1.1.1.1:53                                    |
++----------------------------------------------------------------------------------------------------------+
+```
 
-The project decomposes into an **Orbit Model** where **Engine E4 (Query Execution VM)** acts as the central state machine dispatching to three specialized satellite engines:
+---
 
-| Engine | Engine Name | Student Owner | Course Alignment | Core Responsibilities |
-| :---: | :--- | :--- | :--- | :--- |
-| **E1** | **Protocol Parsing & Wire Message Engine** | Vageesh Mathad | **Computer Networks** | RFC 1035 wire datagram unpacking, bitfield extraction, recursion-bounded pointer decompression (depth $\le$ 16), wire serialization (`0xC00C`). |
-| **E2** | **In-Memory Storage & Cache Engine** | Mehak Sayed Yusuf | **DAA & DBMS** | Hash table + Doubly-linked list for $O(1)$ LRU eviction; Min-Heap priority queue for $O(\log N)$ proactive TTL purge; dynamic remaining TTL aging; `SRWLOCK` thread safety; disk snapshot (`dns_cache.db`). |
-| **E3** | **Upstream Resolution & Network Forwarding Engine** | Ishani G | **Computer Networks & OS** | Recursive query forwarder to `8.8.8.8` / `1.1.1.1` over non-blocking UDP sockets (`select()`), exponential retry backoff, Kaminsky 16-bit TxID defense. |
-| **E4** | **Query Execution VM & Telemetry Engine** | Joel Biju | **OSPP** | 6-Stage VM instruction pipeline (`FETCH` ➔ `DECODE` ➔ `LOOKUP` ➔ `RESOLVE` ➔ `COMMIT` ➔ `EMIT`), error condition routing (`HIT`, `MISS`, `EXPIRED`, `NXDOMAIN`, `SERVFAIL`, `FORMERR`), thread pool, real-time microsecond telemetry. |
+## ⚙️ 5-Engine Architecture
+
+| Engine | Name | Owner | Academic Subject | Responsibilities |
+|:---:|:---|:---|:---|:---|
+| **E1** | Protocol Parsing & Wire Message Engine | Vageesh Mathad | Computer Networks | RFC 1035 wire unpacking, header bitfields, recursion-bounded pointer decompression (depth ≤ 16), `0xC00C` compression serializer |
+| **E2** | In-Memory Storage & Cache Engine | Mehak Sayed Yusuf | DAA & DBMS | O(1) LRU (hash map + doubly-linked list), O(log N) Min-Heap proactive TTL sweep, dynamic TTL aging, reader-writer locking, disk snapshot (`dns_cache_<id>.db`) |
+| **E3** | Upstream Resolution & Network Forwarding Engine | Ishani G | Computer Networks & OS | Non-blocking UDP to `8.8.8.8` / `1.1.1.1`, `select()` 2s timeout, exponential backoff, randomized TxID Kaminsky defense |
+| **E4** | Query Execution VM & Telemetry Engine | Joel Biju | OSPP | 6-Stage pipeline (`FETCH→DECODE→LOOKUP→RESOLVE→COMMIT→EMIT`), condition routing (`HIT/MISS/EXPIRED/NXDOMAIN/SERVFAIL/FORMERR`), thread pool, real-time microsecond telemetry |
+| **E5** | Telemetry Subsystem | Joel Biju | OSPP | Live QPS, hit ratio %, latency histogram, client IP dashboard, cluster-prefixed logging |
 
 ---
 
 ## ⚙️ 6-Stage VM Execution Pipeline
 
-![Engine Pipeline Stages](diagrams/engine_pipeline_diagram.png)
-
 Every inbound client request executes deterministically through an explicit 6-stage instruction pipeline:
-1. **FETCH:** Network reactor ingests raw 512-byte datagram on port 8053, creates an isolated buffer copy, and pushes the transaction into the worker queue.
-2. **DECODE (Engine E1):** Unpacks the 12-byte header, decodes domain labels, and verifies pointer dereference depth ($\le 16$) to eliminate cyclic freeze exploits.
-3. **LOOKUP (Engine E2):** Queries cache via composite key `(domain, qtype, qclass)`. On a **HIT**, dynamically recalculates decaying remaining TTL ($TTL_{rem} = TTL_{orig} - \Delta t$) and splices node to MRU head.
-4. **RESOLVE (Engine E3):** On a **MISS / EXPIRED**, dispatches raw query to upstream `8.8.8.8:53` with non-blocking socket timeout (2.0s) and validates the 16-bit TxID against Kaminsky spoofing.
-5. **COMMIT (Engine E2):** Commits upstream answer into in-memory hash index and Min-Heap. If memory limit is reached, evicts tail node in $O(1)$ time.
-6. **EMIT (Engine E1):** Serializes compliant RFC 1035 response packet with `0xC00C` pointer compression and transmits datagram back to the client via `sendto()`.
+
+1. **FETCH:** Reactor ingests raw 512-byte UDP datagram on port `8053`, creates isolated buffer copy, pushes into worker queue.
+2. **DECODE (E1):** Unpacks 12-byte header, decodes domain labels, enforces decompression depth ≤ 16.
+3. **LOOKUP (E2):** Queries cache via composite key `(domain, qtype, qclass)`. **HIT** → recalculate decaying TTL and splice to MRU head.
+4. **RESOLVE (E3):** On **MISS/EXPIRED** → forwards to `8.8.8.8:53` with 2s non-blocking timeout, validates 16-bit TxID.
+5. **COMMIT (E2):** Inserts upstream answer into hash index + Min-Heap; evicts LRU tail if at capacity.
+6. **EMIT (E1):** Serializes RFC 1035 response with `0xC00C` pointer compression, transmits via `sendto()`, logs microsecond latency.
 
 ---
 
-## 🧠 Dual-Index In-Memory Cache Model
+## 🚀 Quick Start: Download ZIP and Run
 
-![Dual-Index Cache Architecture](diagrams/cache_lru_minheap_diagram.png)
+### Prerequisites (on each VM — Ubuntu 22.04 LTS or 24.04 LTS)
+```bash
+sudo apt update && sudo apt install -y build-essential git python3
+```
 
-- **$O(1)$ LRU Capacity Eviction:** `std::unordered_map` provides instantaneous key lookups while an intrusive doubly-linked list (`std::list`) tracks recency. Access promotes to head; overflow drops tail.
-- **$O(\log N)$ Proactive TTL Expiration:** `std::priority_queue` Min-Heap keyed by absolute expiration timestamp (`ExpiresAt = now + TTL`). Root node always holds the earliest expiring entry, enabling immediate purging without full-table scans.
-- **Dynamic TTL Aging:** Downstream clients receive strictly non-stale countdowns calculated at query time.
-- **Thread Synchronization:** Multi-reader single-writer locking via Windows `SRWLOCK` (`AcquireSRWLockShared` for lookups, `AcquireSRWLockExclusive` for insertions/evictions).
-- **Snapshot Persistence:** Serializes active valid cache entries to `dns_cache.db` on graceful `SIGINT` (Ctrl+C) shutdown, and performs cache warm-up on boot.
-
----
-
-## 🛠️ Build and Run Instructions
-
-### Prerequisites
-- **OS:** Windows 10 / 11
-- **Compiler:** MinGW GCC (`g++` supporting C++14 or higher)
-- **Make:** `mingw32-make`
-- **Libraries:** Windows Sockets (`-lws2_32`)
-
-### 1. Clone the Repository
+### Step 1 — Clone or Download
 ```bash
 git clone https://github.com/mehaksayedyusuf/dns-resolver-caching-server.git
 cd dns-resolver-caching-server
 ```
+> Or: **Download ZIP** from GitHub → extract → `cd dns-resolver-caching-server`
 
-### 2. Build the Server
+### Step 2 — Build
 ```bash
-mingw32-make all
+make clean && make all
 ```
-The compiled binary is written to `bin/dns_server.exe`.
+The compiled binary is at `bin/dns_server`.
 
-### 3. Run the Server
+### Step 3 — Run Cluster-Alpha (VM 1)
 ```bash
-./bin/dns_server.exe
+./bin/dns_server -b 0.0.0.0 -p 8053 --cluster-id CLUSTER-ALPHA -c 1000 -t 4
 ```
-*The server will bind to UDP `127.0.0.1:8053` and output live resolution telemetry.*
 
-### 4. Run Modular Engine Tests
+### Step 4 — Run Cluster-Beta (VM 2)
 ```bash
-mingw32-make test_protocol   # Run Engine E1 test suite
-mingw32-make test_cache      # Run Engine E2 test suite
-mingw32-make test_upstream   # Run Engine E3 test suite
-mingw32-make test_vm         # Run Engine E4 integration test suite
+./bin/dns_server -b 0.0.0.0 -p 8053 --cluster-id CLUSTER-BETA -c 1000 -t 4
+```
+
+### Step 5 — Test from Host Laptop (Windows)
+```powershell
+# Single query to Cluster-Alpha
+dig @192.168.150.10 -p 8053 google.com A
+
+# Single query to Cluster-Beta
+dig @192.168.150.20 -p 8053 google.com A
+
+# Windows nslookup
+nslookup -port=8053 google.com 192.168.150.10
+
+# Automated multi-cluster + failover test
+python scripts/cluster_client.py --primary 192.168.150.10:8053 --secondary 192.168.150.20:8053 --mode all
 ```
 
 ---
 
-## 🧪 Testing with Standard DNS Tools
+## 🖥️ Server CLI Options
 
-In a separate terminal, test resolution against the server using standard DNS client utilities:
-
-### Using `dig`
-```bash
-dig @127.0.0.1 -p 8053 example.com A
-```
-
-### Using `nslookup`
-```bash
-nslookup -port=8053 example.com 127.0.0.1
-```
+| Flag | Default | Description |
+|:---|:---|:---|
+| `-b <ip>` / `--bind <ip>` | `0.0.0.0` | Network interface to listen on (use `0.0.0.0` for all VM interfaces) |
+| `-p <port>` | `8053` | UDP port to listen on |
+| `--cluster-id <name>` | `CLUSTER-ALPHA` | Cluster identity tag for telemetry and DB naming |
+| `-c <capacity>` | `1000` | LRU cache max record capacity |
+| `-t <threads>` | `4` | Worker thread pool size |
+| `--peer <ip:port>` | _(none)_ | Peer cluster for inter-cluster query forwarding |
+| `--db <file>` | `dns_cache_<cluster-id>.db` | Custom cache snapshot filename |
 
 ---
 
@@ -109,40 +138,121 @@ nslookup -port=8053 example.com 127.0.0.1
 
 ```
 dns-resolver-caching-server/
-├── Makefile                                   # MinGW C++ build system (all, test, clean)
-├── README.md                                  # This documentation landing page
-├── CONTEXT.md                                 # Session state continuity tracker
-├── DOCUMENTATION/                             # Official deliverables & living guides
-│   ├── CPP_MASTER_PLAN_GUIDE.md               # Master architectural blueprint & viva guide
-│   ├── Gate_0_team11_document.docx            # Submitted Gate 0 Document
-│   ├── Gate_0_team11_ppt.pptx                 # Submitted Gate 0 Presentation
-│   ├── Team11_Gate1.pptx                      # Submitted Gate 1 Presentation
-│   └── Team11_S1_Student_Handbook.docx        # Submitted S1 Requirements Handbook
-├── diagrams/                                  # 300-DPI ultra-high-resolution architectural graphics
-│   ├── system_orbit_diagram.png               # System Orbit Architecture diagram
-│   ├── engine_pipeline_diagram.png            # 6-Stage VM Instruction Pipeline diagram
-│   ├── cache_lru_minheap_diagram.png          # Dual-Index Cache Architecture diagram
-│   ├── wire_protocol_format_diagram.png       # RFC 1035 Header & Decompression diagram
-│   └── concurrency_threadpool_diagram.png     # Reactor & Worker Thread Pool diagram
-├── include/                                   # C++ header files (.hpp)
-│   ├── common.hpp                             # RFC 1035 constants, big-endian helpers, RAII locks
-│   ├── protocol_engine.hpp                    # Engine E1 header
-│   ├── storage_engine.hpp                     # Engine E2 header
-│   ├── upstream_engine.hpp                    # Engine E3 header
-│   ├── vm_engine.hpp                          # Engine E4 header
-│   └── telemetry_engine.hpp                   # Telemetry & KPI header
-├── src/                                       # C++ engine implementations (.cpp)
-└── tests/                                     # Modular test suites (.cpp)
+├── Makefile                                   # Cross-platform build (auto-detects Linux vs Windows)
+├── README.md                                  # This file
+├── VM_CLUSTER_IMPLEMENTATION.md              # VM architecture blueprint & step-by-step deployment
+├── VERIFICATION_REPORT.txt                   # 72/72 automated verification checks passed
+├── CONTEXT.md                                # Project continuity & state tracker
+├── DOCUMENTATION/                             # Official academic deliverables
+│   ├── Team11_Chapter4_Sprint1_Handbook_Final.pdf
+│   ├── Team11_Chapter4_Sprint1_Handbook_Submission.docx
+│   ├── Team11_Sprint1.docx
+│   ├── Gate_0_team11_document.docx
+│   ├── Gate_0_team11_ppt.pptx
+│   └── Team11_Gate1.pptx
+├── diagrams/                                  # High-resolution architecture diagrams (PNG)
+│   ├── engine_pipeline_diagram.png
+│   ├── cache_storage_er_diagram.png
+│   ├── dns_resolution_flowchart.png
+│   ├── engine_e3_upstream_diagram.png
+│   ├── engine_e5_telemetry_diagram.png
+│   └── vm_pipeline_branching_diagram.png
+├── include/                                   # C++ headers
+│   ├── common.hpp                             # Cross-platform socket/mutex abstraction (Linux + Windows)
+│   ├── protocol_engine.hpp                    # E1: Wire parser & serializer
+│   ├── storage_engine.hpp                     # E2: Dual-index LRU + Min-Heap cache
+│   ├── upstream_engine.hpp                    # E3: Upstream UDP forwarder
+│   ├── vm_engine.hpp                          # E4: 6-stage VM pipeline
+│   └── telemetry_engine.hpp                   # E5: Telemetry subsystem
+├── src/                                       # C++ implementations
+│   ├── main.cpp                               # Reactor loop, cluster CLI args, thread pool
+│   ├── protocol_engine.cpp
+│   ├── storage_engine.cpp
+│   ├── upstream_engine.cpp                    # Cross-platform: fcntl/ioctlsocket, select()
+│   ├── vm_engine.cpp
+│   └── telemetry_engine.cpp
+├── tests/                                     # Modular engine test suites
+│   ├── test_protocol.cpp                      # E1: 10 tests
+│   ├── test_cache.cpp                         # E2: 10 tests
+│   ├── test_upstream.cpp                      # E3: 6 tests
+│   └── test_vm_integration.cpp               # E4: 7 tests
+├── benchmarks/
+│   └── BENCHMARK_REPORT.md                   # Concurrency stress benchmark results
+├── scripts/
+│   ├── cluster_client.py                      # Multi-cluster test client (hit/miss/failover/loadbalance)
+│   ├── deploy_vm_cluster.sh                   # One-click VM build & deploy script
+│   ├── verify_implementation.py               # 72-check automated verification suite
+│   └── benchmark_stress.py                   # Concurrent stress benchmark tool
+└── docs/
+    ├── CPP_MASTER_GUIDE.md                    # Viva defense guide & 30 Q&A
+    └── CPP_MASTER_PLAN.md                     # Architectural specification
 ```
 
 ---
 
-## 👥 Team 11 
+## 🧪 Running Tests
 
-- **Mehak Sayed Yusuf** (`01fe24bci012`) — *Engine E2: In-Memory Storage & Cache Engine*
-- **Vageesh Mathad** (`01fe24bci008`) — *Engine E1: Protocol Parsing & Wire Message Engine*
-- **Ishani G** (`01fe22bci009`) — *Engine E3: Upstream Resolution & Network Forwarding Engine*
-- **Joel Biju** (`01fe24bci021`) — *Engine E4: Query Execution VM & Telemetry Engine*
+```bash
+make test_protocol   # Engine E1 — 10 tests
+make test_cache      # Engine E2 — 10 tests
+make test_upstream   # Engine E3 — 6 tests
+make test_vm         # Engine E4 — 7 tests
+```
 
-**Faculty Guide:** Mr. Pavankumar S  
+Or run the full verification suite (no compilation needed):
+```bash
+python scripts/verify_implementation.py
+# → 72/72 checks passed (100.0%)
+```
+
+---
+
+## 📊 Performance Benchmarks (Empirical)
+
+| Metric | In-Memory Cache Hit | Upstream WAN Miss | Acceleration |
+|:---|:---:|:---:|:---:|
+| **Minimum Latency** | 0.143 ms | 103.59 ms | 724× |
+| **Median (p50)** | 0.414 ms | 146.36 ms | 353× |
+| **Mean** | 0.700 ms | 154.61 ms | 221× |
+| **Peak Throughput** | **6,538 QPS** | — | — |
+
+> Results from benchmark scenario: 20 concurrent client threads, 1,000 queries, pre-warmed cache.
+> These are benchmark-specific measurements, not universal guarantees.
+
+---
+
+## 🔧 Cross-Platform Build Details
+
+The `Makefile` auto-detects the OS:
+
+| Platform | Socket API | Mutex | Compiler Flag | Binary |
+|:---|:---|:---|:---|:---|
+| **Linux (VM)** | POSIX sockets, `fcntl` | `std::shared_timed_mutex` | `-lpthread` | `bin/dns_server` |
+| **Windows (Host)** | Winsock2 (`ws2_32`) | Win32 `SRWLOCK` | `-lws2_32` | `bin/dns_server.exe` |
+
+---
+
+## 📋 VMware Full Deployment Guide
+
+See **[VM_CLUSTER_IMPLEMENTATION.md](VM_CLUSTER_IMPLEMENTATION.md)** for the complete step-by-step guide including:
+- VMware Workstation Pro network configuration (VMnet8 NAT)
+- Creating and cloning VM 1 & VM 2
+- Setting static IPs
+- Transferring files via Git or SCP
+- Starting Cluster-Alpha and Cluster-Beta
+- Testing with `dig`, `nslookup`, and the Python cluster client
+- Failover simulation and load balancing tests
+
+---
+
+## 👥 Team 11 — PES University
+
+| Name | Roll Number | Engine |
+|:---|:---|:---|
+| **Mehak Sayed Yusuf** | `01fe24bci012` | E2: In-Memory Storage & Cache Engine |
+| **Vageesh Mathad** | `01fe24bci008` | E1: Protocol Parsing & Wire Message Engine |
+| **Ishani G** | `01fe22bci009` | E3: Upstream Resolution & Network Forwarding Engine |
+| **Joel Biju** | `01fe24bci021` | E4: Query Execution VM & Telemetry Engine |
+
+**Faculty Guide:** Mr. Pavankumar S
 **Theme:** Theme 4: Network Systems and Tools (Academic 3-Credit Mini Project)

@@ -1,119 +1,180 @@
 # PROJECT CONTINUITY CONTEXT: DNS RESOLVER & CACHING SERVER (C++)
+## Distributed VM Multi-Cluster Architecture — Active Implementation
 
-> **Purpose:** This file maintains the authoritative live state, completed phases, architectural decisions, and next steps for the project. If a conversation session resets or token limit is reached, any new agent can read this file and resume immediately without re-doing or re-asking anything.
+> **Purpose:** Authoritative live state, completed phases, architectural decisions, and next steps.
+> If a session resets or token limit is reached, any new agent reads this file and resumes immediately.
 
 ---
 
-## 1. Project Overview & Pivot Record
-- **Project Title:** DNS Resolver and Caching Server
+## 1. Project Overview
+
+- **Project Title:** DNS Resolver and Caching Server — Distributed VM Multi-Cluster
 - **Course / Theme:** Theme 4: Network Systems and Tools (Academic 3-Credit Project)
-- **Language Stack:** **C++ (C++14/C++17)** with MinGW GCC (`g++`) on Windows
-- **Core Networking:** Windows Sockets 2 (`ws2_32`), non-blocking UDP datagram sockets
-- **Concurrency & Locks:** Multi-threaded worker pool, Win32 `SRWLOCK` (Reader-Writer) and `CRITICAL_SECTION` RAII wrappers
-- **Official Submission State:** [DOCUMENTATION/](file:///a:/dns-resolver-caching-server/DOCUMENTATION/) contains the official submitted files (`Gate_0_team11_document.docx`, `Gate_0_team11_ppt.pptx`, `Team11_Gate1.pptx`, `Team11_S1_Student_Handbook.docx`). **This folder is strictly protected and never deleted.**
+- **Language Stack:** **C++ (C++14/C++17)** — cross-platform (Linux VMs + Windows host)
+- **Deployment:** VMware Workstation Pro — 2 Ubuntu Server VMs (Cluster-Alpha + Cluster-Beta) on VMnet8 NAT subnet
+- **Networking:** Cross-platform socket abstraction — POSIX (`<sys/socket.h>`, `fcntl`) on Linux, Winsock2 on Windows
+- **Concurrency:** `std::thread`, `std::mutex`, `std::condition_variable` (Linux/Windows); Win32 `SRWLOCK` on Windows host
+- **Official Submission State:** `DOCUMENTATION/` contains all submitted Gate 0 / Gate 1 / Sprint 1 files. **Never deleted.**
 
 ---
 
-## 2. Phase Execution Status Checklist
+## 2. Architecture: VM Multi-Cluster Client-Server
 
-| Phase | Description | Status | Commit SHA / Tag |
-| :---: | :--- | :---: | :--- |
-| **Phase 0** | **Clean Slate & Environment Setup**<br>• Deleted old Go code, tests, and temporary scratch scripts.<br>• Verified and preserved `DOCUMENTATION/`.<br>• Configured `.gitignore` and `Makefile`.<br>• Created `include/common.hpp` (DNS RFC 1035 constants, RAII sync locks). | **COMPLETED** | `phase-0-clean-slate` |
-| **Phase 1** | **Visual Architecture & Orbit Diagrams**<br>• Rendered `system_orbit_diagram.png` (Core VM Orbit model).<br>• Rendered `engine_pipeline_diagram.png` (6-stage VM instruction pipeline).<br>• Rendered `cache_lru_minheap_diagram.png` (Dual-index O(1) LRU + O(log N) TTL). | **COMPLETED** | `phase-1-diagrams` |
-| **Phase 2** | **Engine E1: Protocol Parsing & Wire Message Engine**<br>• `include/protocol_engine.hpp` and `src/protocol_engine.cpp`.<br>• RFC 1035 wire unpacking, header bitfields, 16-level loop-guarded label decompression, response serializer.<br>• Unit tests in `tests/test_protocol.cpp` (10/10 tests passed). | **COMPLETED** | `feat(phase-2)` |
-| **Phase 3** | **Engine E2: In-Memory Storage & Cache Engine**<br>• `include/storage_engine.hpp` and `src/storage_engine.cpp`.<br>• Dual index: Hash map + Doubly-linked list for O(1) LRU; Min-Heap for O(log N) proactive TTL sweep.<br>• Dynamic TTL aging, Reader-Writer locking (`SRWLOCK`), disk snapshot (`dns_cache.db`).<br>• Unit tests in `tests/test_cache.cpp` (8/8 tests passed). | **COMPLETED** | `feat(phase-3)` |
-| **Phase 4** | **Engine E3: Upstream Resolution & Network Forwarding Engine**<br>• `include/upstream_engine.hpp` and `src/upstream_engine.cpp`.<br>• Non-blocking UDP socket forwarder to 8.8.8.8, timeout thresholds, exponential retries, Kaminsky randomized TxID defense.<br>• Unit tests in `tests/test_upstream.cpp` (6/6 tests passed). | **COMPLETED** | `feat(phase-4)` |
-| **Phase 5** | **Engine E4: Query Execution Virtual Machine**<br>• `include/vm_engine.hpp` and `src/vm_engine.cpp`.<br>• 6-stage instruction pipeline (`FETCH->DECODE->LOOKUP->RESOLVE->COMMIT->EMIT`).<br>• Condition handling: `HIT`, `MISS`, `EXPIRED`, `NXDOMAIN` (RFC 2308 negative cache), `SERVFAIL`, `FORMERR`.<br>• Integration tests in `tests/test_vm_integration.cpp` (6/6 tests passed). | **COMPLETED** | `feat(phase-5)` |
-| **Phase 6** | **Telemetry & Performance Analytics Subsystem**<br>• `include/telemetry_engine.hpp` and `src/telemetry_engine.cpp`.<br>• Real-time hit ratio tracking, microsecond latency histograms, QPS counters, live dashboard. | **COMPLETED** | `feat(phase-5)` |
-| **Phase 7** | **Server Main Entry, Multi-Threaded Worker Pool & Live Validation**<br>• `src/main.cpp` listening on UDP `127.0.0.1:8053`.<br>• Worker thread pool with queue concurrency.<br>• Live validation with Python/nslookup (121.26ms miss ➔ 0.85ms hit, 140x speedup). | **COMPLETED** | `feat(phase-7)` |
-| **Phase 8** | **New C++ Master Guide & Project Report**<br>• `docs/CPP_MASTER_GUIDE.md` (Theory, Engine Walkthroughs, 30 Viva Q&As, CN/OSPP/DAA/DBMS mapping, Test & Live benchmarks). | **COMPLETED** | `docs(phase-8)` |
+```
+HOST LAPTOP (VMware Workstation Pro)
+  │
+  ├─ VMnet8 NAT (192.168.150.0/24)
+  │      │
+  │      ├─ VM 1: Cluster-Alpha (192.168.150.10:8053)
+  │      │    └─ bin/dns_server -b 0.0.0.0 --cluster-id CLUSTER-ALPHA
+  │      │
+  │      └─ VM 2: Cluster-Beta  (192.168.150.20:8053)
+  │           └─ bin/dns_server -b 0.0.0.0 --cluster-id CLUSTER-BETA
+  │
+  ├─ CLIENT: dig @192.168.150.10 -p 8053 google.com A
+  ├─ CLIENT: python scripts/cluster_client.py --mode all
+  └─ UPSTREAM DNS: 8.8.8.8 (primary) / 1.1.1.1 (failover)
+```
 
 ---
 
-## 3. Workspace File Inventory
+## 3. Phase Execution Status
+
+| Phase | Description | Status |
+|:---:|:---|:---:|
+| **Phase 0** | Clean slate, Makefile, common.hpp, .gitignore | ✅ COMPLETED |
+| **Phase 1** | Architecture diagrams (orbit, pipeline, cache, wire, threadpool) | ✅ COMPLETED |
+| **Phase 2** | E1: Protocol Parsing & Wire Message Engine (10 tests) | ✅ COMPLETED |
+| **Phase 3** | E2: In-Memory Storage & Cache Engine (10 tests) | ✅ COMPLETED |
+| **Phase 4** | E3: Upstream Resolution & Network Forwarding Engine (6 tests) | ✅ COMPLETED |
+| **Phase 5** | E4: Query Execution Virtual Machine (7 tests) | ✅ COMPLETED |
+| **Phase 6** | E5: Telemetry Subsystem | ✅ COMPLETED |
+| **Phase 7** | Server main loop, multi-threaded worker pool | ✅ COMPLETED |
+| **Phase 8** | Viva guide, benchmarks, documentation | ✅ COMPLETED |
+| **Phase 9** | **VM Multi-Cluster Architecture** — cross-platform POSIX/Win32 abstraction, cluster CLI args (`--bind`, `--cluster-id`, `--peer`), VMware deployment guide, cluster client, verification suite | ✅ COMPLETED |
+
+---
+
+## 4. Modified Files (VM Phase)
+
+| File | Change |
+|:---|:---|
+| `include/common.hpp` | Cross-platform: `#ifdef _WIN32` POSIX socket typedefs, `std::shared_timed_mutex`, `std::mutex` |
+| `src/main.cpp` | `--bind`, `--cluster-id`, `--peer`, `--db` CLI args; `std::thread` pool; POSIX `signal(SIGINT/SIGTERM)` |
+| `src/upstream_engine.cpp` | `fcntl` vs `ioctlsocket`, portable `select(sock+1,...)`, `ECONNREFUSED` vs `WSAECONNRESET` |
+| `Makefile` | `ifeq ($(OS),Windows_NT)` auto-detection; `-lpthread` on Linux, `-lws2_32` on Windows |
+
+---
+
+## 5. New Files (VM Phase)
+
+| File | Purpose |
+|:---|:---|
+| `VM_CLUSTER_IMPLEMENTATION.md` | Master architecture doc + step-by-step VMware deployment guide |
+| `scripts/deploy_vm_cluster.sh` | One-click bash deployer for Linux VMs |
+| `scripts/cluster_client.py` | Multi-cluster test client (hit-miss/loadbalance/failover/all modes) |
+| `scripts/verify_implementation.py` | 72-check automated verification suite |
+| `VERIFICATION_REPORT.txt` | Output: 72/72 passed (100.0%) |
+| `diagrams/*.png` | High-res: cache_storage_er, dns_resolution_flowchart, engine_e3_upstream, engine_e5_telemetry, vm_pipeline_branching |
+| `DOCUMENTATION/Team11_Chapter4_Sprint1_Handbook_Final.pdf` | Sprint 1 handbook PDF |
+| `DOCUMENTATION/Team11_Chapter4_Sprint1_Handbook_Submission.docx` | Sprint 1 handbook DOCX |
+
+---
+
+## 6. Workspace File Inventory
 
 ```
 a:/dns-resolver-caching-server/
-├── CONTEXT.md                                 # [THIS FILE] Project continuity & state tracker
-├── Makefile                                   # MinGW C++ build system (all, test, clean)
-├── README.md                                  # Repository overview
-├── .gitignore                                 # Ignores *.o, *.exe, bin/, *.db
-├── DOCUMENTATION/                             # [PRESERVED DELIVERABLES & LIVING GUIDE]
-│   ├── CPP_MASTER_PLAN_GUIDE.md               # [LIVING MASTER PLAN] Synchronized on every change
+├── CONTEXT.md                             ← [THIS FILE]
+├── Makefile                               ← Cross-platform (Linux -lpthread / Windows -lws2_32)
+├── README.md                              ← Updated for VM architecture
+├── VM_CLUSTER_IMPLEMENTATION.md          ← Full VM deployment blueprint
+├── VERIFICATION_REPORT.txt               ← 72/72 checks passed
+├── .gitignore
+├── DOCUMENTATION/                         ← [PRESERVED — never delete]
 │   ├── Gate_0_team11_document.docx
 │   ├── Gate_0_team11_ppt.pptx
 │   ├── Team11_Gate1.pptx
-│   └── Team11_S1_Student_Handbook.docx
-├── diagrams/                                  # [PRIMARY HIGH-RES ASSETS - 300 DPI]
-│   ├── system_orbit_diagram.png               # Orbit architecture graphic (766 KB)
-│   ├── engine_pipeline_diagram.png            # 6-stage instruction pipeline graphic (348 KB)
-│   ├── cache_lru_minheap_diagram.png          # Dual-index O(1) LRU + O(log N) TTL (345 KB)
-│   ├── wire_protocol_format_diagram.png       # 12-byte header + pointer loop guard (390 KB)
-│   └── concurrency_threadpool_diagram.png     # Reactor, Thread Pool & SRWLOCK (407 KB)
+│   ├── Team11_S1_Student_Handbook.docx
+│   ├── Team11_Sprint1.docx
+│   ├── Team11_Chapter4_Sprint1_Handbook_Final.pdf
+│   └── Team11_Chapter4_Sprint1_Handbook_Submission.docx
+├── diagrams/                              ← High-res PNGs (300 DPI)
 ├── docs/
-│   ├── CPP_MASTER_PLAN.md                     # Synchronized Master Plan
-│   ├── CPP_MASTER_GUIDE.md                    # Comprehensive Viva Defense Report & Q&A
-│   └── diagrams/                              # Mirrored architectural assets
+│   ├── CPP_MASTER_GUIDE.md               ← Viva defense guide (30 Q&A) — updated
+│   └── CPP_MASTER_PLAN.md                ← Architectural spec — updated
 ├── include/
-│   ├── common.hpp                             # RFC 1035 constants, RAII Mutex & SRWLOCK wrappers
-│   ├── protocol_engine.hpp                    # E1: Wire Parser & Serializer definitions
-│   ├── storage_engine.hpp                     # E2: Dual-index LRU + Min-Heap Cache definitions
-│   ├── upstream_engine.hpp                    # E3: Upstream UDP Forwarder & Kaminsky defense
-│   ├── vm_engine.hpp                          # E4: Query Execution VM Pipeline definitions
-│   └── telemetry_engine.hpp                   # Telemetry & KPI metric tracking definitions
+│   ├── common.hpp                         ← Cross-platform abstraction
+│   ├── protocol_engine.hpp
+│   ├── storage_engine.hpp
+│   ├── upstream_engine.hpp
+│   ├── vm_engine.hpp
+│   └── telemetry_engine.hpp
 ├── src/
-│   ├── protocol_engine.cpp                    # E1: Wire unpacking, label decompression
-│   ├── storage_engine.cpp                     # E2: LRU splice, TTL minheap, disk snapshot
-│   ├── upstream_engine.cpp                    # E3: Non-blocking UDP select(), retry, TxID
-│   ├── vm_engine.cpp                          # E4: 6-stage pipeline executor
-│   ├── telemetry_engine.cpp                   # Telemetry analytics & dashboard
-│   └── main.cpp                               # Server entry, Reactor loop, thread pool
+│   ├── main.cpp                           ← VM cluster entry point
+│   ├── protocol_engine.cpp
+│   ├── storage_engine.cpp
+│   ├── upstream_engine.cpp                ← Cross-platform non-blocking UDP
+│   ├── vm_engine.cpp
+│   └── telemetry_engine.cpp
 ├── tests/
-│   ├── test_protocol.cpp                      # 10 unit tests for Engine E1 (Passed)
-│   ├── test_cache.cpp                         # 8 unit tests for Engine E2 (Passed)
-│   ├── test_upstream.cpp                      # 6 unit tests for Engine E3 (Passed)
-│   └── test_vm_integration.cpp               # 6 integration tests for Engine E4 (Passed)
-├── benchmarks/                                # Concurrency stress test reports & metrics
-│   ├── BENCHMARK_REPORT.md                    # Stress test analysis & latency percentiles
-│   ├── benchmark_hit.json                     # Pure cache hit 500-query benchmark results
-│   ├── benchmark_hit_1000.json                # Pure cache hit 1000-query (6538 QPS) results
-│   └── benchmark_mixed.json                   # 80/20 mixed workload benchmark results
+│   ├── test_protocol.cpp                  ← 10 tests (E1)
+│   ├── test_cache.cpp                     ← 10 tests (E2)
+│   ├── test_upstream.cpp                  ← 6 tests (E3)
+│   └── test_vm_integration.cpp           ← 7 tests (E4)
+├── benchmarks/
+│   └── BENCHMARK_REPORT.md               ← Updated for VM cluster deployment
 ├── scripts/
-│   ├── live_client.py                         # Interactive manual lookup & live verification client
-│   └── benchmark_stress.py                    # Multi-threaded concurrent stress test tool
+│   ├── cluster_client.py                  ← Multi-cluster test client
+│   ├── deploy_vm_cluster.sh               ← VM one-click deployer
+│   ├── verify_implementation.py           ← 72-check suite
+│   └── benchmark_stress.py               ← Concurrent stress tool
 └── bin/
-    └── dns_server.exe                         # Production binary executable
+    └── dns_server  (or dns_server.exe)   ← Compiled binary (after make all)
 ```
 
 ---
 
-## 4. Architectural Summary of the 4 S1 Engines
+## 7. Build & Run (Canonical Commands)
 
-1. **E1: Protocol Parsing & Wire Message Engine** (Owner: Vageesh Mathad)
-   - Unpacks RFC 1035 byte streams from raw UDP buffers.
-   - Decompresses 14-bit pointer offsets (`0xC000`) with cycle-depth limit 16 to block pointer loops.
-   - Serializes outgoing DNS responses with pointer compression.
-2. **E2: In-Memory Storage & Cache Engine** (Owner: Mehak Sayed Yusuf)
-   - Dual-index architecture: `std::unordered_map` for $O(1)$ key lookup + `std::list` for recency order.
-   - `std::priority_queue` Min-Heap keyed by `ExpiresAt` for $O(\log N)$ proactive TTL expiration.
-   - Dynamic TTL recalculation: $TTL_{rem} = TTL_{orig} - \Delta t$.
-   - Multi-reader single-writer locking via Win32 `SRWLOCK`.
-   - Snapshot dump to `dns_cache.db` on graceful shutdown and boot warm-up.
-3. **E3: Upstream Resolution & Network Forwarding Engine** (Owner: Ishani G)
-   - Recursive forwarding to upstream DNS (8.8.8.8, 1.1.1.1) over UDP.
-   - Non-blocking socket polling with timeout (`select`) and exponential retry.
-   - Cryptographic TxID randomization to defeat Kaminsky cache poisoning.
-4. **E4: Query Execution Virtual Machine & Telemetry Engine** (Owner: Joel Biju)
-   - State machine coordinating the 6 instruction stages (`FETCH ➔ DECODE ➔ LOOKUP ➔ RESOLVE ➔ COMMIT ➔ EMIT`).
-   - Query condition handler: `HIT`, `MISS`, `EXPIRED`, `NXDOMAIN`, `SERVFAIL`, `FORMERR`.
-   - Thread pool for concurrent worker dispatch.
-   - Real-time telemetry: hit/miss counters, hit ratio %, and microsecond latency tracking.
+### On Linux VM (Ubuntu inside VMware):
+```bash
+git clone https://github.com/mehaksayedyusuf/dns-resolver-caching-server.git
+cd dns-resolver-caching-server
+make clean && make all
+./bin/dns_server -b 0.0.0.0 -p 8053 --cluster-id CLUSTER-ALPHA -c 1000 -t 4
+```
+
+### On Windows (host — requires MinGW/MSYS2):
+```powershell
+mingw32-make all
+.\bin\dns_server.exe -b 0.0.0.0 -p 8053 --cluster-id CLUSTER-ALPHA
+```
+
+### Test from Host (PowerShell):
+```powershell
+dig @192.168.150.10 -p 8053 google.com A
+python scripts/cluster_client.py --primary 192.168.150.10:8053 --secondary 192.168.150.20:8053 --mode all
+```
 
 ---
 
-## 5. Continuity Instructions for New Sessions
-If context limits occur:
-1. Open this file (`CONTEXT.md`).
-2. Identify the first phase marked as `*Pending*` in Section 2.
-3. Proceed directly to implement that phase using the C++ architecture defined herein.
-4. Test thoroughly, update `CONTEXT.md`, and commit changes.
+## 8. Continuity Instructions for New Sessions
+
+1. Open `VM_CLUSTER_IMPLEMENTATION.md` — read the **Resumption State Matrix** (all CP-01 through CP-08 are ✅ Completed).
+2. Open this file (`CONTEXT.md`) — all phases through Phase 9 are ✅ Completed.
+3. The repo is live at `https://github.com/mehaksayedyusuf/dns-resolver-caching-server` (branch: `main`, commit: `5797716`).
+4. All work is done. No pending phases.
+
+---
+
+## 9. Team
+
+| Name | Roll | Engine |
+|:---|:---|:---|
+| Vageesh Mathad | 01fe24bci008 | E1: Protocol Parsing |
+| Mehak Sayed Yusuf | 01fe24bci012 | E2: Storage & Cache |
+| Ishani G | 01fe22bci009 | E3: Upstream Resolution |
+| Joel Biju | 01fe24bci021 | E4: Query Execution VM & Telemetry |
+
+**Faculty Guide:** Mr. Pavankumar S | **Theme:** Theme 4: Network Systems and Tools
