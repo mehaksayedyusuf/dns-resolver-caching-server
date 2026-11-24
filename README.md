@@ -4,7 +4,7 @@
 [![RFC: 1035 Compliant](https://img.shields.io/badge/RFC-1035%20DNS-blue.svg)](https://www.ietf.org/rfc/rfc1035.txt)
 [![Networking: Winsock2](https://img.shields.io/badge/Network-Winsock2%20(UDP)-orange.svg)](https://learn.microsoft.com/en-us/windows/win32/winsock/windows-sockets-start-page-2)
 [![Academic Theme: Network Systems](https://img.shields.io/badge/Theme-Network%20Systems%20%26%20Tools-success.svg)]()
-[![Team: 11](https://img.shields.io/badge/Team-11%20(PES%20University)-purple.svg)]()
+[![Team: 11](https://img.shields.io/badge/Team-11%20-purple.svg)]()
 
 An RFC 1035 compliant **DNS Resolver and In-Memory Caching Server** built from scratch in **C++** using **Windows Sockets 2 (`ws2_32`)** and native Windows synchronization primitives (`SRWLOCK`).
 
