@@ -1,12 +1,28 @@
 #ifndef COMMON_HPP
 #define COMMON_HPP
 
-#define _WIN32_WINNT 0x0600
-#define WIN32_LEAN_AND_MEAN
+#ifdef _WIN32
+    #define _WIN32_WINNT 0x0600
+    #define WIN32_LEAN_AND_MEAN
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #include <windows.h>
+#else
+    #include <sys/types.h>
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <unistd.h>
+    #include <fcntl.h>
+    #include <netdb.h>
+    #include <errno.h>
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
+    typedef int SOCKET;
+    #define INVALID_SOCKET (-1)
+    #define SOCKET_ERROR   (-1)
+    #define closesocket(s) close(s)
+    #define WSAGetLastError() errno
+#endif
 
 #include <cstdint>
 #include <string>
@@ -17,6 +33,10 @@
 #include <sstream>
 #include <algorithm>
 #include <cstring>
+#include <mutex>
+#include <condition_variable>
+#include <shared_mutex>
+#include <thread>
 
 // DNS Constants (RFC 1035)
 constexpr uint16_t DNS_PORT = 53;
@@ -55,8 +75,11 @@ constexpr uint16_t FLAG_RA = 0x0080;
 constexpr uint16_t FLAG_RCODE_MASK = 0x000F;
 
 // ============================================================================
-// Native Thread Synchronization Primitives (RAII Wrapper over Win32)
+// Cross-Platform Thread Synchronization Primitives
+// (Win32 SRWLOCK / CRITICAL_SECTION on Windows; std::mutex / std::shared_timed_mutex on Linux)
 // ============================================================================
+
+#ifdef _WIN32
 
 // Mutual Exclusion Lock (Exclusive)
 class Mutex {
@@ -70,18 +93,6 @@ public:
 
     Mutex(const Mutex&) = delete;
     Mutex& operator=(const Mutex&) = delete;
-};
-
-// RAII Lock Guard for Mutex
-class LockGuard {
-private:
-    Mutex& mtx_;
-public:
-    explicit LockGuard(Mutex& mtx) : mtx_(mtx) { mtx_.lock(); }
-    ~LockGuard() { mtx_.unlock(); }
-
-    LockGuard(const LockGuard&) = delete;
-    LockGuard& operator=(const LockGuard&) = delete;
 };
 
 // Reader-Writer Lock (Multi-reader, single-writer using Win32 SRWLOCK)
@@ -100,6 +111,54 @@ public:
 
     SharedMutex(const SharedMutex&) = delete;
     SharedMutex& operator=(const SharedMutex&) = delete;
+};
+
+#else
+
+// POSIX / Linux Mutual Exclusion Lock
+class Mutex {
+private:
+    std::mutex mtx_;
+public:
+    Mutex() = default;
+    ~Mutex() = default;
+    void lock() { mtx_.lock(); }
+    void unlock() { mtx_.unlock(); }
+
+    Mutex(const Mutex&) = delete;
+    Mutex& operator=(const Mutex&) = delete;
+};
+
+// POSIX / Linux Reader-Writer Lock
+class SharedMutex {
+private:
+    std::shared_timed_mutex mtx_;
+public:
+    SharedMutex() = default;
+    ~SharedMutex() = default;
+
+    void lock_shared() { mtx_.lock_shared(); }
+    void unlock_shared() { mtx_.unlock_shared(); }
+
+    void lock() { mtx_.lock(); }
+    void unlock() { mtx_.unlock(); }
+
+    SharedMutex(const SharedMutex&) = delete;
+    SharedMutex& operator=(const SharedMutex&) = delete;
+};
+
+#endif
+
+// RAII Lock Guard for Mutex
+class LockGuard {
+private:
+    Mutex& mtx_;
+public:
+    explicit LockGuard(Mutex& mtx) : mtx_(mtx) { mtx_.lock(); }
+    ~LockGuard() { mtx_.unlock(); }
+
+    LockGuard(const LockGuard&) = delete;
+    LockGuard& operator=(const LockGuard&) = delete;
 };
 
 // RAII Read Lock Guard (Shared)

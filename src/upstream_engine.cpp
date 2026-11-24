@@ -2,6 +2,7 @@
 #include <random>
 #include <iostream>
 
+#ifdef _WIN32
 bool UpstreamEngine::winsock_initialized_ = false;
 
 void UpstreamEngine::ensure_winsock_initialized() {
@@ -12,6 +13,13 @@ void UpstreamEngine::ensure_winsock_initialized() {
         }
     }
 }
+#else
+bool UpstreamEngine::winsock_initialized_ = true;
+
+void UpstreamEngine::ensure_winsock_initialized() {
+    // No-op on POSIX
+}
+#endif
 
 UpstreamEngine::UpstreamEngine(const UpstreamConfig& config)
     : config_(config) {
@@ -56,8 +64,13 @@ UpstreamResult UpstreamEngine::query_host(const std::string& host, uint16_t port
     }
 
     // Set non-blocking I/O
+#ifdef _WIN32
     u_long non_blocking_mode = 1;
     ioctlsocket(sock, FIONBIO, &non_blocking_mode);
+#else
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+#endif
 
     sockaddr_in dest_addr;
     std::memset(&dest_addr, 0, sizeof(dest_addr));
@@ -87,7 +100,7 @@ UpstreamResult UpstreamEngine::query_host(const std::string& host, uint16_t port
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
-    int sel = select(0, &read_fds, NULL, NULL, &tv);
+    int sel = select(sock + 1, &read_fds, NULL, NULL, &tv);
     if (sel == 0) {
         closesocket(sock);
         result.status = UpstreamStatus::TIMEOUT;
@@ -96,7 +109,11 @@ UpstreamResult UpstreamEngine::query_host(const std::string& host, uint16_t port
     } else if (sel == SOCKET_ERROR) {
         int err = WSAGetLastError();
         closesocket(sock);
+#ifdef _WIN32
         if (err == WSAECONNRESET) {
+#else
+        if (err == ECONNREFUSED || err == ENETUNREACH) {
+#endif
             result.status = UpstreamStatus::TIMEOUT;
             result.error_message = "Remote port unreachable (connection reset)";
         } else {
@@ -109,7 +126,11 @@ UpstreamResult UpstreamEngine::query_host(const std::string& host, uint16_t port
     // Receive incoming datagram
     uint8_t recv_buffer[1024];
     sockaddr_in from_addr;
+#ifdef _WIN32
     int from_len = sizeof(from_addr);
+#else
+    socklen_t from_len = sizeof(from_addr);
+#endif
 
     int recv_bytes = recvfrom(sock, reinterpret_cast<char*>(recv_buffer), sizeof(recv_buffer), 0,
                               reinterpret_cast<struct sockaddr*>(&from_addr), &from_len);
@@ -122,7 +143,11 @@ UpstreamResult UpstreamEngine::query_host(const std::string& host, uint16_t port
 
     if (recv_bytes == SOCKET_ERROR) {
         int err = WSAGetLastError();
+#ifdef _WIN32
         if (err == WSAECONNRESET) {
+#else
+        if (err == ECONNREFUSED || err == ENETUNREACH) {
+#endif
             result.status = UpstreamStatus::TIMEOUT;
             result.error_message = "Port unreachable / connection reset";
         } else {

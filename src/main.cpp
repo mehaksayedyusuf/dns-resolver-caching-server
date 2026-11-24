@@ -12,15 +12,28 @@
 #include <string>
 #include <sstream>
 #include <chrono>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <csignal>
 
 // ============================================================================
-// DNS RESOLVER & CACHING SERVER (MAIN SERVER ENTRY & REACTOR THREAD POOL)
+// DNS RESOLVER & CACHING SERVER (VM MULTI-CLUSTER CLIENT-SERVER REACTOR)
 // Academic Theme 4: Network Systems and Tools (Team 11)
-// Architecture: Reactor Socket Listener + Worker Thread Pool + 6-Stage VM
+// Architecture: Multi-Interface Reactor + Worker Pool + 6-Stage VM + Cluster ID
 // ============================================================================
 
-static volatile bool g_running = true;
+static std::atomic<bool> g_running(true);
 
+// Universal Signal Handler for Graceful Shutdown
+void SignalHandler(int signum) {
+    (void)signum;
+    std::cout << "\n[SERVER] Shutdown signal received. Initiating graceful shutdown...\n";
+    g_running = false;
+}
+
+#ifdef _WIN32
 // Win32 Console Signal Handler (Ctrl+C / Termination)
 BOOL WINAPI ConsoleCtrlHandler(DWORD signal) {
     if (signal == CTRL_C_EVENT || signal == CTRL_BREAK_EVENT || signal == CTRL_CLOSE_EVENT) {
@@ -30,6 +43,7 @@ BOOL WINAPI ConsoleCtrlHandler(DWORD signal) {
     }
     return FALSE;
 }
+#endif
 
 // Client Transaction Task for Thread Pool
 struct ClientTask {
@@ -37,72 +51,60 @@ struct ClientTask {
     sockaddr_in client_addr;
 };
 
-// Thread-Safe Worker Task Queue (Win32 CRITICAL_SECTION + CONDITION_VARIABLE)
+// Thread-Safe Worker Task Queue (Cross-Platform C++14 Thread Pool)
 class WorkerThreadPool {
 public:
-    WorkerThreadPool(size_t num_workers, VMEngine& vm, SOCKET listen_socket)
-        : vm_(vm), listen_socket_(listen_socket), stopping_(false) {
-        InitializeCriticalSection(&cs_);
-        InitializeConditionVariable(&cv_);
-
+    WorkerThreadPool(size_t num_workers, VMEngine& vm, SOCKET listen_socket, const std::string& cluster_id)
+        : vm_(vm), listen_socket_(listen_socket), cluster_id_(cluster_id), stopping_(false) {
         for (size_t i = 0; i < num_workers; ++i) {
-            HANDLE h = CreateThread(NULL, 0, WorkerThreadProc, this, 0, NULL);
-            if (h != NULL) {
-                worker_threads_.push_back(h);
-            }
+            workers_.emplace_back(&WorkerThreadPool::worker_loop, this);
         }
     }
 
     ~WorkerThreadPool() {
         stop();
-        DeleteCriticalSection(&cs_);
     }
 
     void enqueue(ClientTask task) {
-        EnterCriticalSection(&cs_);
-        tasks_.push(std::move(task));
-        WakeConditionVariable(&cv_);
-        LeaveCriticalSection(&cs_);
+        {
+            std::unique_lock<std::mutex> lock(queue_mtx_);
+            tasks_.push(std::move(task));
+        }
+        queue_cv_.notify_one();
     }
 
     void stop() {
-        EnterCriticalSection(&cs_);
-        stopping_ = true;
-        WakeAllConditionVariable(&cv_);
-        LeaveCriticalSection(&cs_);
-
-        for (HANDLE h : worker_threads_) {
-            WaitForSingleObject(h, 2000);
-            CloseHandle(h);
+        {
+            std::unique_lock<std::mutex> lock(queue_mtx_);
+            stopping_ = true;
         }
-        worker_threads_.clear();
+        queue_cv_.notify_all();
+
+        for (std::thread& t : workers_) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+        workers_.clear();
     }
 
 private:
-    static DWORD WINAPI WorkerThreadProc(LPVOID lpParam) {
-        WorkerThreadPool* pool = static_cast<WorkerThreadPool*>(lpParam);
-        pool->worker_loop();
-        return 0;
-    }
-
     void worker_loop() {
         while (true) {
             ClientTask task;
             {
-                EnterCriticalSection(&cs_);
+                std::unique_lock<std::mutex> lock(queue_mtx_);
                 while (tasks_.empty() && !stopping_) {
-                    SleepConditionVariableCS(&cv_, &cs_, INFINITE);
+                    queue_cv_.wait(lock);
                 }
                 if (stopping_ && tasks_.empty()) {
-                    LeaveCriticalSection(&cs_);
                     break;
                 }
                 task = std::move(tasks_.front());
                 tasks_.pop();
-                LeaveCriticalSection(&cs_);
             }
 
-            // Execute 6-stage VM pipeline for client datagram
+            // Client endpoint identification (Client-Server mechanism)
             std::string client_ip = inet_ntoa(task.client_addr.sin_addr);
             uint16_t client_port = ntohs(task.client_addr.sin_port);
 
@@ -111,50 +113,52 @@ private:
             tx.client_port = client_port;
             tx.inbound_raw = std::move(task.buffer);
 
+            // Execute 6-stage VM pipeline
             vm_.process_transaction(tx);
 
-            // Log detailed query outcome and cache verification
+            // Log detailed outcome with Cluster Node prefix
             std::string qname = !tx.query_packet.questions.empty() ? tx.query_packet.questions[0].qname : "<malformed>";
             std::string qtype_str = !tx.query_packet.questions.empty() ? ProtocolEngine::qtype_to_string(tx.query_packet.questions[0].qtype) : "";
             double lat_ms = tx.latency_microseconds / 1000.0;
 
+            std::string prefix = "[" + cluster_id_ + "] ";
+
             if (tx.condition == VMCondition::CACHE_HIT) {
                 uint32_t rem_ttl = !tx.response_packet.answers.empty() ? tx.response_packet.answers[0].ttl : 0;
-                std::cout << "[CACHE HIT] " << qname << " (" << qtype_str << ") -> "
-                          << tx.response_packet.answers.size() << " answer(s) in "
-                          << std::fixed << std::setprecision(2) << lat_ms << "ms (remaining TTL: "
-                          << rem_ttl << "s)\n";
+                std::cout << prefix << "[CACHE HIT] " << qname << " (" << qtype_str << ") -> "
+                          << tx.response_packet.answers.size() << " answer(s) to " << client_ip << ":" << client_port
+                          << " in " << std::fixed << std::setprecision(2) << lat_ms << "ms (TTL: " << rem_ttl << "s)\n";
             } else if (tx.condition == VMCondition::CACHE_NEGATIVE_HIT) {
-                std::cout << "[CACHE NEGATIVE HIT] " << qname << " -> NXDOMAIN in "
+                std::cout << prefix << "[NEGATIVE HIT] " << qname << " -> NXDOMAIN to " << client_ip << " in "
                           << std::fixed << std::setprecision(2) << lat_ms << "ms\n";
             } else if (tx.condition == VMCondition::UPSTREAM_SUCCESS) {
-                std::cout << "[CACHE MISS -> RESOLVED] " << qname << " (" << qtype_str << ") -> "
-                          << tx.response_packet.answers.size() << " answer(s) from upstream in "
-                          << std::fixed << std::setprecision(2) << lat_ms << "ms (saved to cache)\n";
+                std::cout << prefix << "[CACHE MISS -> RESOLVED] " << qname << " (" << qtype_str << ") -> "
+                          << tx.response_packet.answers.size() << " answer(s) from upstream to " << client_ip
+                          << " in " << std::fixed << std::setprecision(2) << lat_ms << "ms (cached)\n";
             } else if (tx.condition == VMCondition::UPSTREAM_NXDOMAIN) {
-                std::cout << "[CACHE MISS -> NXDOMAIN] " << qname << " -> NXDOMAIN from upstream in "
-                          << std::fixed << std::setprecision(2) << lat_ms << "ms (negative cached)\n";
+                std::cout << prefix << "[MISS -> NXDOMAIN] " << qname << " -> NXDOMAIN to " << client_ip
+                          << " in " << std::fixed << std::setprecision(2) << lat_ms << "ms\n";
             } else if (tx.condition == VMCondition::CACHE_EXPIRED) {
-                std::cout << "[CACHE EXPIRED] " << qname << " (" << qtype_str << ") -> Refreshed from upstream in "
+                std::cout << prefix << "[CACHE EXPIRED] " << qname << " (" << qtype_str << ") -> Refreshed in "
                           << std::fixed << std::setprecision(2) << lat_ms << "ms\n";
             } else if (tx.condition == VMCondition::UPSTREAM_TIMEOUT) {
-                std::cout << "[UPSTREAM TIMEOUT] " << qname << " -> SERVFAIL in "
+                std::cout << prefix << "[UPSTREAM TIMEOUT] " << qname << " -> SERVFAIL in "
                           << std::fixed << std::setprecision(2) << lat_ms << "ms\n";
             } else if (tx.condition == VMCondition::FORMERR_MALFORMED) {
-                std::cout << "[FORMERR] Malformed query from " << client_ip << ":" << client_port << "\n";
+                std::cout << prefix << "[FORMERR] Malformed query from " << client_ip << ":" << client_port << "\n";
             } else {
-                std::cout << "[RESOLVED] " << qname << " (" << VMEngine::condition_to_string(tx.condition) << ") in "
+                std::cout << prefix << "[RESOLVED] " << qname << " (" << VMEngine::condition_to_string(tx.condition) << ") in "
                           << std::fixed << std::setprecision(2) << lat_ms << "ms\n";
             }
 
-            // Transmit serialized response datagram back to client
+            // Transmit serialized RFC 1035 response datagram back to client
             if (!tx.outbound_raw.empty()) {
                 int sent = sendto(listen_socket_, reinterpret_cast<const char*>(tx.outbound_raw.data()),
                                   static_cast<int>(tx.outbound_raw.size()), 0,
                                   reinterpret_cast<struct sockaddr*>(&task.client_addr),
                                   sizeof(task.client_addr));
                 if (sent == SOCKET_ERROR) {
-                    std::cerr << "[WORKER] sendto failed: " << WSAGetLastError() << "\n";
+                    std::cerr << prefix << "[WORKER] sendto failed: " << WSAGetLastError() << "\n";
                 }
             }
         }
@@ -162,36 +166,39 @@ private:
 
     VMEngine& vm_;
     SOCKET listen_socket_;
-    CRITICAL_SECTION cs_;
-    CONDITION_VARIABLE cv_;
+    std::string cluster_id_;
+    std::mutex queue_mtx_;
+    std::condition_variable queue_cv_;
     std::queue<ClientTask> tasks_;
-    std::vector<HANDLE> worker_threads_;
+    std::vector<std::thread> workers_;
     bool stopping_;
 };
 
-static void print_banner(uint16_t port, const std::string& upstream_ip, size_t capacity, size_t threads) {
+static void print_banner(const std::string& cluster_id, const std::string& bind_ip, uint16_t port,
+                         const std::string& upstream_ip, size_t capacity, size_t threads,
+                         const std::string& peer_cluster) {
     std::cout << "\n";
     std::cout << "===========================================================================\n";
     std::cout << "        RFC 1035 DNS RESOLVER & IN-MEMORY CACHING SERVER (C++)             \n";
-    std::cout << "                  Theme 4: Network Systems & Tools                         \n";
+    std::cout << "        Theme 4: Network Systems & Tools | Clustered VM Deployment         \n";
     std::cout << "===========================================================================\n";
-    std::cout << "  Core Architecture Engines:\n";
-    std::cout << "    • E1 (Protocol Wire Engine) : Vageesh Mathad (Computer Networks)\n";
-    std::cout << "    • E2 (Dual-Index Cache)     : Mehak Sayed Yusuf (DAA & DBMS)\n";
-    std::cout << "    • E3 (Upstream Forwarder)   : Ishani G (CN & OS)\n";
-    std::cout << "    • E4 (Query Execution VM)   : Joel Biju (OSPP)\n";
+    std::cout << "  Cluster Identity & Networking:\n";
+    std::cout << "    • Cluster Node ID : " << cluster_id << "\n";
+    std::cout << "    • Listening Bind  : " << bind_ip << ":" << port << " (UDP)\n";
+    std::cout << "    • Primary Upstream: " << upstream_ip << ":53 (Google Public DNS)\n";
+    std::cout << "    • Fallback DNS    : 1.1.1.1:53 (Cloudflare Public DNS)\n";
+    if (!peer_cluster.empty()) {
+        std::cout << "    • Peer Cluster    : " << peer_cluster << " (Inter-Cluster Peering)\n";
+    }
     std::cout << "---------------------------------------------------------------------------\n";
-    std::cout << "  Server Configuration:\n";
-    std::cout << "    • Listening On  : 127.0.0.1:" << port << " (UDP)\n";
-    std::cout << "    • Upstream DNS  : " << upstream_ip << ":53 (Google Public DNS)\n";
-    std::cout << "    • Fallback DNS  : 1.1.1.1:53 (Cloudflare Public DNS)\n";
-    std::cout << "    • In-Memory LRU : " << capacity << " records capacity\n";
-    std::cout << "    • Worker Pool   : " << threads << " OS worker threads\n";
-    std::cout << "    • Durability DB : dns_cache.db\n";
+    std::cout << "  Engine Performance & Storage:\n";
+    std::cout << "    • In-Memory Cache : " << capacity << " records capacity (Dual-Index LRU+Heap)\n";
+    std::cout << "    • Worker Pool     : " << threads << " OS worker threads\n";
+    std::cout << "    • Persistence DB  : dns_cache_" << cluster_id << ".db\n";
     std::cout << "===========================================================================\n";
     std::cout << "  Ready for client queries! (Press Ctrl+C to terminate gracefully)\n";
-    std::cout << "  Example test command:\n";
-    std::cout << "    dig @127.0.0.1 -p " << port << " example.com A\n";
+    std::cout << "  Example Client Query from Host or Client VM:\n";
+    std::cout << "    dig @" << (bind_ip == "0.0.0.0" ? "<VM_IP>" : bind_ip) << " -p " << port << " example.com A\n";
     std::cout << "===========================================================================\n\n";
 }
 
@@ -199,41 +206,58 @@ int main(int argc, char* argv[]) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
+    std::string cluster_id = "CLUSTER-ALPHA";
+    std::string bind_ip = "0.0.0.0";
     uint16_t port = DEFAULT_SERVER_PORT;
     std::string upstream_ip = "8.8.8.8";
     size_t cache_capacity = 1000;
     size_t worker_threads = 4;
-    std::string db_file = "dns_cache.db";
+    std::string peer_cluster = "";
+    std::string db_file = "";
     bool warmup = true;
 
     // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "-p" && i + 1 < argc) {
+        if ((arg == "-b" || arg == "--bind") && i + 1 < argc) {
+            bind_ip = argv[++i];
+        } else if ((arg == "-p" || arg == "--port") && i + 1 < argc) {
             port = static_cast<uint16_t>(std::stoi(argv[++i]));
-        } else if (arg == "-u" && i + 1 < argc) {
+        } else if ((arg == "-u" || arg == "--upstream") && i + 1 < argc) {
             upstream_ip = argv[++i];
-        } else if (arg == "-c" && i + 1 < argc) {
+        } else if ((arg == "-c" || arg == "--capacity") && i + 1 < argc) {
             cache_capacity = static_cast<size_t>(std::stoul(argv[++i]));
-        } else if (arg == "-t" && i + 1 < argc) {
+        } else if ((arg == "-t" || arg == "--threads") && i + 1 < argc) {
             worker_threads = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if ((arg == "--cluster-id" || arg == "--cluster") && i + 1 < argc) {
+            cluster_id = argv[++i];
+        } else if (arg == "--peer" && i + 1 < argc) {
+            peer_cluster = argv[++i];
+        } else if (arg == "--db" && i + 1 < argc) {
+            db_file = argv[++i];
         } else if (arg == "--no-warmup") {
             warmup = false;
         } else if (arg == "-h" || arg == "--help") {
-            std::cout << "Usage: dns_server.exe [-p port] [-u upstream] [-c capacity] [-t threads] [--no-warmup]\n";
+            std::cout << "Usage: dns_server [-b bind_ip] [-p port] [-u upstream] [-c capacity] [-t threads] [--cluster-id id] [--peer ip:port]\n";
             return 0;
         }
     }
 
-    // Register Win32 Console Ctrl Handler
-    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+    if (db_file.empty()) {
+        db_file = "dns_cache_" + cluster_id + ".db";
+    }
 
-    // Initialize Winsock2
+    // Register Signal Handlers
+    std::signal(SIGINT, SignalHandler);
+    std::signal(SIGTERM, SignalHandler);
+#ifdef _WIN32
+    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         std::cerr << "[ERROR] WSAStartup failed: " << WSAGetLastError() << std::endl;
         return 1;
     }
+#endif
 
     // Instantiate Satellite Engines
     StorageEngine cache_engine(cache_capacity);
@@ -247,7 +271,7 @@ int main(int argc, char* argv[]) {
     // Boot Warm-up: Load persistent cache snapshot from disk if available
     if (warmup) {
         if (cache_engine.load_snapshot(db_file)) {
-            std::cout << "[CACHE] Cache warm-up successful! Restored " << cache_engine.size()
+            std::cout << "[" << cluster_id << "][CACHE] Warm-up successful! Restored " << cache_engine.size()
                       << " active records from '" << db_file << "'.\n";
         }
     }
@@ -256,32 +280,45 @@ int main(int argc, char* argv[]) {
     SOCKET server_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (server_sock == INVALID_SOCKET) {
         std::cerr << "[ERROR] Failed to create UDP listening socket: " << WSAGetLastError() << std::endl;
+#ifdef _WIN32
         WSACleanup();
+#endif
         return 1;
     }
 
-    // Bind Socket to 127.0.0.1:port
+    // Bind Socket to specified interface (0.0.0.0 allows all VM interfaces)
     sockaddr_in server_addr;
     std::memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
-    server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (bind_ip == "0.0.0.0") {
+        server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    } else {
+        server_addr.sin_addr.s_addr = inet_addr(bind_ip.c_str());
+    }
 
     if (bind(server_sock, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) == SOCKET_ERROR) {
-        std::cerr << "[ERROR] Socket bind to 127.0.0.1:" << port << " failed: " << WSAGetLastError() << std::endl;
+        std::cerr << "[ERROR] Socket bind to " << bind_ip << ":" << port << " failed: " << WSAGetLastError() << std::endl;
         closesocket(server_sock);
+#ifdef _WIN32
         WSACleanup();
+#endif
         return 1;
     }
 
     // Set Non-blocking mode on listen socket for responsive shutdown polling
+#ifdef _WIN32
     u_long non_blocking_mode = 1;
     ioctlsocket(server_sock, FIONBIO, &non_blocking_mode);
+#else
+    int flags = fcntl(server_sock, F_GETFL, 0);
+    fcntl(server_sock, F_SETFL, flags | O_NONBLOCK);
+#endif
 
     // Launch Multi-Threaded Worker Pool
-    WorkerThreadPool pool(worker_threads, vm_engine, server_sock);
+    WorkerThreadPool pool(worker_threads, vm_engine, server_sock, cluster_id);
 
-    print_banner(port, upstream_ip, cache_capacity, worker_threads);
+    print_banner(cluster_id, bind_ip, port, upstream_ip, cache_capacity, worker_threads, peer_cluster);
 
     auto last_telemetry_time = std::chrono::steady_clock::now();
     auto last_sweep_time = std::chrono::steady_clock::now();
@@ -294,12 +331,16 @@ int main(int argc, char* argv[]) {
 
         // 100ms select timeout ensures smooth exit on Ctrl+C signal
         struct timeval tv = { 0, 100000 };
-        int sel = select(0, &read_fds, NULL, NULL, &tv);
+        int sel = select(server_sock + 1, &read_fds, NULL, NULL, &tv);
 
         if (sel > 0) {
             uint8_t buffer[DNS_MAX_PACKET_SIZE * 2];
             sockaddr_in client_addr;
+#ifdef _WIN32
             int client_len = sizeof(client_addr);
+#else
+            socklen_t client_len = sizeof(client_addr);
+#endif
 
             int bytes = recvfrom(server_sock, reinterpret_cast<char*>(buffer), sizeof(buffer), 0,
                                  reinterpret_cast<struct sockaddr*>(&client_addr), &client_len);
@@ -318,8 +359,8 @@ int main(int argc, char* argv[]) {
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_sweep_time).count() >= 5) {
             size_t purged = cache_engine.purge_expired();
             if (purged > 0) {
-                std::cout << "[CACHE SWEEP] Proactively evicted " << purged
-                          << " expired record(s) via Min-Heap. Active cache size: "
+                std::cout << "[" << cluster_id << "][CACHE SWEEP] Evicted " << purged
+                          << " expired record(s) via Min-Heap. Active: "
                           << cache_engine.size() << "/" << cache_capacity << "\n";
             }
             last_sweep_time = now;
@@ -336,22 +377,24 @@ int main(int argc, char* argv[]) {
     }
 
     // Shutdown Sequence
-    std::cout << "[SERVER] Stopping worker threads...\n";
+    std::cout << "[" << cluster_id << "] Stopping worker threads...\n";
     pool.stop();
 
-    std::cout << "[SERVER] Closing network socket...\n";
+    std::cout << "[" << cluster_id << "] Closing network socket...\n";
     closesocket(server_sock);
 
     // Save active cache snapshot to disk (durability persistence)
-    std::cout << "[CACHE] Dumping valid cache entries to '" << db_file << "'...\n";
+    std::cout << "[" << cluster_id << "][CACHE] Saving valid cache entries to '" << db_file << "'...\n";
     if (cache_engine.save_snapshot(db_file)) {
-        std::cout << "[CACHE] Snapshot saved successfully (" << cache_engine.size() << " records active).\n";
+        std::cout << "[" << cluster_id << "][CACHE] Snapshot saved successfully (" << cache_engine.size() << " records active).\n";
     }
 
     // Print Final Telemetry Report
     std::cout << telemetry_engine.generate_dashboard();
 
+#ifdef _WIN32
     WSACleanup();
-    std::cout << "[SERVER] Graceful shutdown complete. Goodbye!\n";
+#endif
+    std::cout << "[" << cluster_id << "] Graceful shutdown complete. Goodbye!\n";
     return 0;
 }
