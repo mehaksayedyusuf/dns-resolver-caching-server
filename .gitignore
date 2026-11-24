@@ -35,6 +35,11 @@ GSD-STYLE.md
 PROJECT_RULES.md
 VERSION
 model_capabilities.yaml
+CONTEXT.md
+VERIFICATION_REPORT.txt
+
+# Duplicate / internal docs
+DOCUMENTATION/CPP_MASTER_PLAN_GUIDE.md
 
 # Diagram/doc generation scripts (outputs kept, scripts excluded)
 generate_all_highres_diagrams.py
